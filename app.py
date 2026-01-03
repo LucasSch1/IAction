@@ -254,20 +254,8 @@ ai_service = AIService()
 mqtt_service = get_mqtt_instance()  # Utiliser le singleton MQTT
 detection_service = DetectionService(ai_service, mqtt_service)
 
-# Variables globales
+# Variables globales pour compatibilité
 current_frame = None
-ctx.is_capturing = True
-
-threading.Thread(
-    target=capture_loop,
-    args=(ctx,),
-    daemon=True
-).start()
-
-mqtt_service.publish_binary_sensor_state(
-    f"capture_active_{ctx.camera_id}", True
-)
-
 analysis_in_progress = False  # Indique si une analyse est en cours
 last_analysis_time = 0  # Timestamp de la dernière analyse terminée
 last_analysis_duration = 0  # Durée de la dernière analyse en secondes
