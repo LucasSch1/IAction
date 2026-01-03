@@ -365,8 +365,7 @@ status_log_interval = 60  # Intervalle en secondes entre les logs de status
 
 @app.route('/api/status')
 def get_status():
-    """Récupère les informations de statut de l'analyse"""
-    global last_analysis_time, last_analysis_duration, analysis_in_progress
+    """Récupère les informations de statut de l'analyse pour toutes les caméras"""
     global status_request_count, last_status_log_time
     
     # Incrémenter le compteur de requêtes
@@ -379,10 +378,19 @@ def get_status():
         status_request_count = 0
         last_status_log_time = current_time
     
+    # Collecter le statut de toutes les caméras
+    cameras_status = {}
+    for camera_id, ctx in camera_contexts.items():
+        cameras_status[camera_id] = {
+            'last_analysis_time': ctx.last_analysis_time,
+            'last_analysis_duration': ctx.last_analysis_duration,
+            'analysis_in_progress': ctx.analysis_in_progress,
+            'is_capturing': ctx.is_capturing
+        }
+    
     status = {
-        'last_analysis_time': last_analysis_time,
-        'last_analysis_duration': last_analysis_duration,
-        'analysis_in_progress': analysis_in_progress
+        'cameras': cameras_status,
+        'active_cameras': len([ctx for ctx in camera_contexts.values() if ctx.is_capturing])
     }
     
     return jsonify(status)
@@ -407,11 +415,17 @@ def get_metrics():
 
 @app.route('/api/capture_status')
 def get_capture_status():
-    """Retourne l'état actuel de la capture"""
-    global is_capturing
+    """Retourne l'état actuel de la capture pour toutes les caméras"""
+    cameras_capture_status = {}
+    for camera_id, ctx in camera_contexts.items():
+        cameras_capture_status[camera_id] = {
+            'is_capturing': ctx.is_capturing,
+            'camera_active': camera_id in camera_service.captures
+        }
+    
     return jsonify({
-        'is_capturing': is_capturing,
-        'camera_active': camera_service.is_capturing if hasattr(camera_service, 'is_capturing') else False
+        'cameras': cameras_capture_status,
+        'active_cameras': len([ctx for ctx in camera_contexts.values() if ctx.is_capturing])
     })
 
 #Modification multi-cam
@@ -537,16 +551,59 @@ def start_capture():
 
 @app.route('/api/stop_capture', methods=['POST'])
 def stop_capture():
-    """Arrête la capture vidéo"""
-    global is_capturing
-    
-    is_capturing = False
-    camera_service.stop_capture()
-    # Publier l'état de capture (OFF)
+    """Arrête la capture vidéo pour une ou toutes les caméras"""
     try:
-        mqtt_service.publish_binary_sensor_state('capture_active', False)
-    except Exception:
-        pass
+        data = request.json or {}
+        camera_id = data.get('camera_id')
+        
+        if camera_id:
+            # Arrêter une caméra spécifique
+            if camera_id in camera_contexts:
+                ctx = camera_contexts[camera_id]
+                ctx.is_capturing = False
+                camera_service.stop_capture(camera_id)
+                
+                # Publier l'état de capture (OFF) pour cette caméra
+                try:
+                    mqtt_service.publish_binary_sensor_state(f'capture_active_{camera_id}', False)
+                except Exception:
+                    pass
+                    
+                # Supprimer le contexte
+                del camera_contexts[camera_id]
+                
+                return jsonify({
+                    'success': True,
+                    'message': f'Capture arrêtée pour {camera_id}'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': f'Caméra {camera_id} introuvable'
+                }), 404
+        else:
+            # Arrêter toutes les caméras
+            for cam_id, ctx in camera_contexts.items():
+                ctx.is_capturing = False
+                try:
+                    mqtt_service.publish_binary_sensor_state(f'capture_active_{cam_id}', False)
+                except Exception:
+                    pass
+                    
+            camera_service.stop_capture()  # Arrêter toutes
+            camera_contexts.clear()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Toutes les captures arrêtées'
+            })
+            
+    except Exception as e:
+        logger.exception("Erreur stop_capture")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
     
     return jsonify({'status': 'Capture arrêtée'})
 
@@ -619,105 +676,79 @@ def delete_detection(detection_id):
     else:
         return jsonify({'error': 'Détection non trouvée'}), 404
 
-@app.route('/api/current_frame')
-def get_current_frame():
-    """Récupère l'image actuelle"""
-    global current_frame
-    
-    if current_frame is None:
+@app.route('/api/current_frame/<camera_id>')
+def get_current_frame(camera_id):
+    """Récupère l'image actuelle pour une caméra spécifique"""
+    ctx = camera_contexts.get(camera_id)
+    if not ctx or ctx.current_frame is None:
         return jsonify({'error': 'Aucune image disponible'}), 404
     
     # Encoder l'image en base64
-    _, buffer = cv2.imencode('.jpg', current_frame)
+    _, buffer = cv2.imencode('.jpg', ctx.current_frame)
     img_base64 = base64.b64encode(buffer).decode('utf-8')
     
     return jsonify({'image': f'data:image/jpeg;base64,{img_base64}'})
 
-# Variable pour suivre les connexions au flux vidéo
-video_feed_connections = 0
+@app.route('/video_feed/<camera_id>')
+def video_feed(camera_id):
+    """Stream vidéo en temps réel pour une caméra spécifique"""
+    if camera_id not in camera_contexts:
+        return "Camera inconnue", 404
 
-@app.route('/video_feed')
-def video_feed():
-    """Stream vidéo en temps réel"""
+    ctx = camera_contexts[camera_id]
+    
     def generate():
-        global current_frame, video_feed_connections, shutting_down
+        global shutting_down
         error_count = 0
         max_errors = 5
         
-        # Incrémenter le compteur de connexions
-        video_feed_connections += 1
-        connection_id = video_feed_connections
-        logger.info(f"Démarrage du flux vidéo (connexion #{connection_id})...")
-        
-        # Vérifier si c'est une reconnexion rapide (moins de 5 secondes depuis la dernière connexion)
-        current_time = time.time()
-        if hasattr(app, 'last_video_feed_connection_time') and current_time - app.last_video_feed_connection_time < 5:
-            logger.info(f"Reconnexion rapide détectée (#{connection_id}) - Intervalle: {current_time - app.last_video_feed_connection_time:.2f}s")
-        
-        # Mettre à jour le temps de la dernière connexion
-        app.last_video_feed_connection_time = current_time
+        logger.info(f"[{camera_id}] Démarrage du flux vidéo...")
         
         try:
-            while True:
+            while ctx.is_capturing:
                 # Arrêt propre si shutdown demandé
                 if shutting_down:
-                    logger.info(f"Arrêt du flux vidéo (connexion #{connection_id}) - arrêt application en cours")
+                    logger.info(f"[{camera_id}] Arrêt du flux vidéo - arrêt application en cours")
                     break
                 try:
-                    if current_frame is not None:
+                    if ctx.current_frame is not None:
                         # Convertir l'image en JPEG avec compression optimisée
                         encode_params = [cv2.IMWRITE_JPEG_QUALITY, 85]  # Qualité optimisée
-                        success, buffer = cv2.imencode('.jpg', current_frame, encode_params)
+                        success, buffer = cv2.imencode('.jpg', ctx.current_frame, encode_params)
                         if success:
                             frame = buffer.tobytes()
                             yield (b'--frame\r\n'
                                    b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
                             error_count = 0  # Réinitialiser le compteur d'erreurs
                         else:
-                            logger.error("Erreur d'encodage de l'image")
+                            logger.error(f"[{camera_id}] Erreur d'encodage de l'image")
                             error_count += 1
                     else:
-                        logger.debug("Pas d'image disponible")
+                        logger.debug(f"[{camera_id}] Pas d'image disponible")
                         error_count += 1
                         
                     # Si trop d'erreurs consécutives, arrêter le flux
                     if error_count > max_errors:
-                        logger.error(f"Trop d'erreurs dans le flux vidéo, arrêt du flux (connexion #{connection_id})")
+                        logger.error(f"[{camera_id}] Trop d'erreurs dans le flux vidéo, arrêt du flux")
                         break
                         
-                    # Cadence du flux alignée sur la source si possible
-                    try:
-                        fps = camera_service.get_source_fps() if hasattr(camera_service, 'get_source_fps') else None
-                        if fps and fps > 0:
-                            interval = 1.0 / fps
-                        else:
-                            # Fallback: si mode HA polling actif, se caler sur l'intervalle de polling
-                            if os.getenv('CAPTURE_MODE', 'rtsp') == 'ha_polling':
-                                interval = max(float(os.getenv('HA_POLL_INTERVAL', '1.0')), 0.2)
-                            else:
-                                interval = 0.033
-                    except Exception:
-                        interval = 0.033
-                    time.sleep(interval)
+                    time.sleep(0.03)
                 except Exception as e:
-                    logger.exception(f"Exception dans le flux vidéo: {e}")
+                    logger.exception(f"[{camera_id}] Exception dans le flux vidéo: {e}")
                     error_count += 1
                     if error_count > max_errors:
-                        logger.error(f"Trop d'exceptions dans le flux vidéo, arrêt du flux (connexion #{connection_id})")
+                        logger.error(f"[{camera_id}] Trop d'exceptions dans le flux vidéo, arrêt du flux")
                         break
                     time.sleep(0.5)  # Attendre un peu plus longtemps en cas d'erreur
         finally:
-            # Décrémenter le compteur de connexions à la fermeture
-            video_feed_connections -= 1
-            logger.info(f"Flux vidéo fermé (connexion #{connection_id}) - Connexions actives: {video_feed_connections}")
+            logger.info(f"[{camera_id}] Flux vidéo fermé")
+    
     # Retourner une réponse streaming MJPEG
-    logger.info("Préparation de la réponse streaming MJPEG /video_feed")
+    logger.info(f"[{camera_id}] Préparation de la réponse streaming MJPEG /video_feed")
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-def ha_polling_loop():
-    """Boucle de capture via Home Assistant en utilisant HAService."""
-    global current_frame, is_capturing, analysis_in_progress, last_analysis_time
-
+def ha_polling_loop(ctx: CameraContext):
+    """Boucle de capture via Home Assistant en utilisant HAService pour une caméra spécifique."""
     base_url = os.getenv('HA_BASE_URL', '').rstrip('/')
     token = os.getenv('HA_TOKEN', '')
     entity_id = os.getenv('HA_ENTITY_ID', '')
@@ -743,57 +774,58 @@ def ha_polling_loop():
     )
 
     def on_frame(frame):
-        global current_frame, analysis_in_progress, last_analysis_time
         # Publier la frame courante
-        current_frame = frame
+        ctx.current_frame = frame
         # Déclencher analyse si intervalle OK
         current_time = time.time()
-        if not analysis_in_progress and (current_time - last_analysis_time) >= min_analysis_interval:
-            analysis_thread = threading.Thread(target=analyze_frame, args=(frame.copy(), current_time), daemon=True)
-            analysis_thread.start()
-            analysis_in_progress = True
+        if not ctx.analysis_in_progress and (current_time - ctx.last_analysis_time) >= min_analysis_interval:
+            ctx.analysis_in_progress = True
+            threading.Thread(
+                target=analyze_frame,
+                args=(ctx, frame.copy(), current_time),
+                daemon=True
+            ).start()
 
     def is_running():
-        return is_capturing
+        return ctx.is_capturing
 
     service.run_loop(on_frame, is_running)
 
 
 def capture_loop(ctx: CameraContext):
     """Boucle principale de capture RTSP"""
-    global current_frame, is_capturing, analysis_in_progress, last_analysis_time, last_analysis_duration
-    
     min_analysis_interval = float(os.getenv('MIN_ANALYSIS_INTERVAL', '0.1'))
     
-    while is_capturing:
+    while ctx.is_capturing:
         try:
-            frame = camera_service.get_frame()
+            frame = camera_service.get_frame(ctx.camera_id)
             if frame is not None:
-                current_frame = frame
+                ctx.current_frame = frame
                 # Déclencher l'analyse si l'intervalle minimum est respecté
                 current_time = time.time()
-                if not analysis_in_progress and (current_time - last_analysis_time) >= min_analysis_interval:
-                    analysis_thread = threading.Thread(target=analyze_frame, args=(frame.copy(), current_time), daemon=True)
-                    analysis_thread.start()
-                    analysis_in_progress = True
+                if not ctx.analysis_in_progress and (current_time - ctx.last_analysis_time) >= min_analysis_interval:
+                    ctx.analysis_in_progress = True
+                    threading.Thread(
+                        target=analyze_frame,
+                        args=(ctx, frame.copy(), current_time),
+                        daemon=True
+                    ).start()
 
             # Cadence alignée sur la source si possible
             try:
-                fps = camera_service.get_source_fps() if hasattr(camera_service, 'get_source_fps') else None
+                fps = camera_service.get_source_fps(ctx.camera_id) if hasattr(camera_service, 'get_source_fps') else None
                 interval = 1.0 / fps if fps and fps > 0 else 0.02
             except Exception:
                 interval = 0.02
             time.sleep(interval)
 
         except Exception as e:
-            logger.exception(f"Exception capture_loop: {e}")
+            logger.exception(f"[{ctx.camera_id}] capture_loop error: {e}")
             time.sleep(0.1)
 
 
-def analyze_frame(ctx: CameraContext, frame, start_time)):
+def analyze_frame(ctx: CameraContext, frame, start_time):
     """Analyse une image avec l'IA"""
-    global analysis_in_progress, last_analysis_time, last_analysis_duration, last_analysis_total_interval, is_capturing, ai_consecutive_failures
-    
     try:
         # Redimensionner l'image en 720p (1280x720) pour l'analyse
         resized_frame = resize_frame_for_analysis(frame)
@@ -803,7 +835,7 @@ def analyze_frame(ctx: CameraContext, frame, start_time)):
         img_base64 = base64.b64encode(buffer).decode('utf-8')
         
         # Analyser avec les détections configurées
-        result = detection_service.analyze_frame(img_base64)
+        result = detection_service.analyze_frame(img_base64, ctx.camera_id)
 
         # Détecter erreurs IA (timeouts et erreurs de connexion) et arrêter si nécessaire
         try:
@@ -825,28 +857,28 @@ def analyze_frame(ctx: CameraContext, frame, start_time)):
 
                 if success_flag:
                     # Reset sur succès
-                    if ai_consecutive_failures:
-                        logger.debug(f"Réinitialisation du compteur d'échecs IA ({ai_consecutive_failures} → 0)")
-                    ai_consecutive_failures = 0
+                    if ctx.ai_consecutive_failures:
+                        logger.debug(f"[{ctx.camera_id}] Réinitialisation du compteur d'échecs IA ({ctx.ai_consecutive_failures} → 0)")
+                    ctx.ai_consecutive_failures = 0
                 else:
-                    ai_consecutive_failures += 1
-                    logger.warning(f"Échec IA #{ai_consecutive_failures}: {err_text[:200]}")
+                    ctx.ai_consecutive_failures += 1
+                    logger.warning(f"[{ctx.camera_id}] Échec IA #{ctx.ai_consecutive_failures}: {err_text[:200]}")
 
                 # Arrêt immédiat sur timeout ou erreur de connexion
                 should_stop_now = is_timeout or is_connection_error
                 # Arrêt après N échecs consécutifs (N=3)
-                failure_threshold_reached = ai_consecutive_failures >= 3
+                failure_threshold_reached = ctx.ai_consecutive_failures >= 3
 
-                if is_capturing and (should_stop_now or failure_threshold_reached):
+                if ctx.is_capturing and (should_stop_now or failure_threshold_reached):
                     reason = 'timeout IA' if is_timeout else ('erreur de connexion IA' if is_connection_error else 'échecs IA répétés')
-                    logger.error(f"🛑 {reason} - arrêt de la capture")
-                    is_capturing = False
+                    logger.error(f"[{ctx.camera_id}] 🛑 {reason} - arrêt de la capture")
+                    ctx.is_capturing = False
                     try:
-                        camera_service.stop_capture()
+                        camera_service.stop_capture(ctx.camera_id)
                     except Exception as e_stop:
-                        logger.warning(f"Erreur lors de l'arrêt de la capture après erreur IA: {e_stop}")
+                        logger.warning(f"[{ctx.camera_id}] Erreur lors de l'arrêt de la capture après erreur IA: {e_stop}")
                     try:
-                        mqtt_service.publish_binary_sensor_state('capture_active', False)
+                        mqtt_service.publish_binary_sensor_state(f'{ctx.camera_id}_capture_active', False)
                     except Exception:
                         pass
         except Exception:
@@ -855,41 +887,34 @@ def analyze_frame(ctx: CameraContext, frame, start_time)):
         
         # Calculer la durée de l'analyse
         end_time = time.time()
-        duration = end_time - start_time
+        ctx.last_analysis_duration = end_time - start_time
         # Calculer l'intervalle total (fin -> fin) par rapport à l'analyse précédente
-        prev_end_time = last_analysis_time
-        total_interval = (end_time - prev_end_time) if prev_end_time and prev_end_time > 0 else 0
+        ctx.last_analysis_total_interval = end_time - ctx.last_analysis_time if ctx.last_analysis_time else 0
+        ctx.last_analysis_time = end_time
         
-        # Mettre à jour les variables globales
-        last_analysis_time = end_time
-        last_analysis_duration = duration
-        last_analysis_total_interval = total_interval
-        
-        if total_interval and total_interval > 0:
-            logger.info(f"Analyse terminée en {duration:.2f}s | Intervalle total: {total_interval:.2f}s | FPS total: {1.0/total_interval:.2f}")
+        if ctx.last_analysis_total_interval and ctx.last_analysis_total_interval > 0:
+            logger.info(f"[{ctx.camera_id}] Analyse terminée en {ctx.last_analysis_duration:.2f}s | Intervalle total: {ctx.last_analysis_total_interval:.2f}s | FPS total: {1.0/ctx.last_analysis_total_interval:.2f}")
         else:
-            logger.info(f"Analyse terminée en {duration:.2f}s")
+            logger.info(f"[{ctx.camera_id}] Analyse terminée en {ctx.last_analysis_duration:.2f}s")
         
         # Publier les informations d'analyse via MQTT
         mqtt_service.publish_status({
-            'last_analysis_time': last_analysis_time,
-            'last_analysis_duration': last_analysis_duration,
-            'analysis_total_interval': last_analysis_total_interval,
-            'analysis_result': result
+            'camera_id': ctx.camera_id,
+            'result': result,
+            'duration': ctx.last_analysis_duration
         })
         
     except Exception as e:
-        logger.error(f"Erreur lors de l'analyse: {e}")
+        logger.error(f"[{ctx.camera_id}] analyse error: {e}")
         # Publier l'erreur via MQTT
         mqtt_service.publish_status({
-            'last_analysis_time': time.time(),
-            'last_analysis_duration': time.time() - start_time,
-            'analysis_error': str(e),
-            'analysis_result': None
+            'camera_id': ctx.camera_id,
+            'error': str(e),
+            'duration': time.time() - start_time
         })
     finally:
         # Marquer l'analyse comme terminée, qu'elle ait réussi ou échoué
-        analysis_in_progress = False
+        ctx.analysis_in_progress = False
 
 @app.route('/admin')
 def admin():
@@ -1219,26 +1244,34 @@ def shutdown_app():
 
 # Fonction pour nettoyer les ressources avant l'arrêt de l'application
 def cleanup():
-    global shutting_down, is_capturing
+    global shutting_down
     if shutting_down:
         return
     logger.info("Nettoyage des ressources...")
-    # Poser les flags d'arrêt
+    # Poser le flag d'arrêt
     shutting_down = True
-    is_capturing = False
+    
+    # Arrêter toutes les caméras
+    for camera_id, ctx in camera_contexts.items():
+        ctx.is_capturing = False
+        try:
+            # Publier l'état de capture (OFF) avant de se déconnecter
+            mqtt_service.publish_binary_sensor_state(f'capture_active_{camera_id}', False)
+        except Exception:
+            pass
+    
     try:
-        camera_service.stop_capture()
+        camera_service.stop_capture()  # Arrêter toutes les captures
     except Exception as e:
-        logger.warning(f"Erreur lors de l'arrêt de la caméra: {e}")
-    try:
-        # Publier l'état de capture (OFF) avant de se déconnecter
-        mqtt_service.publish_binary_sensor_state('capture_active', False)
-    except Exception:
-        pass
+        logger.warning(f"Erreur lors de l'arrêt des caméras: {e}")
+    
     try:
         mqtt_service.disconnect()
     except Exception as e:
         logger.warning(f"Erreur lors de la déconnexion MQTT: {e}")
+        
+    # Vider le registre des caméras
+    camera_contexts.clear()
 
 # Enregistrer la fonction de nettoyage pour qu'elle soit appelée à la fermeture
 import atexit

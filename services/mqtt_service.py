@@ -449,7 +449,13 @@ class MQTTService:
         
         # Publier un JSON avec toutes les informations de statut
         try:
-            status_topic = f"{self.topic_prefix}/status"
+            camera_id = status_data.get('camera_id')
+            if camera_id:
+                # Topic par caméra
+                status_topic = f"{self.topic_prefix}/{camera_id}/status"
+            else:
+                # Topic global
+                status_topic = f"{self.topic_prefix}/status"
             status_json = json.dumps(status_data)
             self.client.publish(status_topic, status_json)
             return True

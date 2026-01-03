@@ -12,21 +12,12 @@ logger = logging.getLogger(__name__)
 
 class CameraService:
     def __init__(self):
-        self.cap = None
-        self.is_capturing = False
-        self.capture_thread = None
-        self.current_frame = None
-        self.current_source = None
-        self.current_type = None
-        self.current_url = None  # URL exacte passée à OpenCV (avec éventuels credentials)
+        # Support multi-caméra - dictionnaire des captures par camera_id
+        self.captures = {}  # camera_id -> {'cap': VideoCapture, 'info': dict}
         self.lock = threading.Lock()
-        self.frame_lock = threading.Lock()
         self.cameras_cache = None
         self.cache_time = 0
         self.cache_duration = 30  # Cache pendant 30 secondes
-        self.last_frame_ts = 0.0
-        self.reconnect_attempts = 0
-        self.next_reconnect_time = 0.0
         
         load_dotenv()
         
@@ -150,16 +141,17 @@ class CameraService:
         
         return f"rtsp://{auth}{ip}:{port}{path}"
     
-    def start_capture(self, source, source_type=None, rtsp_url=None):
-        """Démarre la capture RTSP uniquement"""
+    def start_capture(self, camera_id, source, source_type=None, rtsp_url=None):
+        """Démarre la capture RTSP pour une caméra spécifique"""
         with self.lock:
-            if self.is_capturing:
-                self.stop_capture()
+            # Arrêter la capture existante pour cette caméra
+            if camera_id in self.captures:
+                self.stop_capture(camera_id)
             
             try:
                 # Seul RTSP est supporté
                 source_type = 'rtsp'
-                logger.info(f"Démarrage de la capture RTSP - Source: {source}")
+                logger.info(f"[{camera_id}] Démarrage de la capture RTSP - Source: {source}")
                 
                 if source_type == 'rtsp':
                     # Caméra RTSP
@@ -180,24 +172,38 @@ class CameraService:
                                 parsed = parsed._replace(netloc=auth_netloc)
                                 actual_url = urlunparse(parsed)
                     
-                    logger.info(f"Ouverture du flux RTSP: {actual_url[:50]}...")
+                    logger.info(f"[{camera_id}] Ouverture du flux RTSP: {actual_url[:50]}...")
                     
                     # Configuration optimisée pour RTSP (FFMPEG)
-                    self.cap = cv2.VideoCapture(actual_url, cv2.CAP_FFMPEG)
-                    self.current_url = actual_url
+                    cap = cv2.VideoCapture(actual_url, cv2.CAP_FFMPEG)
                     
                     # Configuration RTSP spécifique pour latence minimale
-                    if self.cap.isOpened():
-                        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer minimal
+                    if cap.isOpened():
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer minimal
                         # Optimisations RTSP pour latence
-                        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
-                        # Pas de timeout pour éviter les délais
+                        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
                         
-                if not self.cap.isOpened():
-                    logger.error("Impossible d'ouvrir la source vidéo RTSP")
-                    return False
+                        # Stocker les informations de la caméra
+                        self.captures[camera_id] = {
+                            'cap': cap,
+                            'source': source,
+                            'type': source_type,
+                            'url': actual_url,
+                            'last_frame_ts': 0.0,
+                            'reconnect_attempts': 0,
+                            'next_reconnect_time': 0.0
+                        }
+                        
+                        logger.info(f"[{camera_id}] Capture RTSP démarrée avec succès")
+                        return True
+                    else:
+                        logger.error(f"[{camera_id}] Impossible d'ouvrir la source vidéo RTSP")
+                        cap.release()
+                        return False
                 
-                # Configuration RTSP
+            except Exception as e:
+                logger.exception(f"[{camera_id}] Erreur lors du démarrage de la capture: {e}")
+                return False
                 logger.info("Configuration des propriétés de la caméra RTSP")
                 
                 # Utiliser la résolution native de la source (ne pas forcer W/H)
@@ -242,106 +248,100 @@ class CameraService:
                 self.current_url = None
                 return False
     
-    def stop_capture(self):
-        """Arrête la capture"""
+    def stop_capture(self, camera_id=None):
+        """Arrête la capture pour une caméra spécifique ou toutes les caméras"""
         with self.lock:
-            self.is_capturing = False
-            if self.cap:
-                self.cap.release()
-                self.cap = None
-            self.current_source = None
-            self.current_type = None
-            self.current_url = None
-            self.reconnect_attempts = 0
-            self.next_reconnect_time = 0.0
+            if camera_id:
+                # Arrêter une caméra spécifique
+                if camera_id in self.captures:
+                    logger.info(f"[{camera_id}] Arrêt de la capture RTSP")
+                    camera_info = self.captures[camera_id]
+                    if camera_info['cap']:
+                        camera_info['cap'].release()
+                    del self.captures[camera_id]
+            else:
+                # Arrêter toutes les caméras
+                logger.info("Arrêt de toutes les captures RTSP")
+                for cam_id, camera_info in self.captures.items():
+                    if camera_info['cap']:
+                        camera_info['cap'].release()
+                self.captures.clear()
     
-    def get_frame(self):
-        """Récupère une image de la caméra avec gestion améliorée"""
+    def get_frame(self, camera_id):
+        """Récupère une image de la caméra spécifique avec gestion améliorée"""
         with self.lock:
-            if not self.is_capturing:
+            if camera_id not in self.captures:
                 return None
-            if not self.cap:
+            
+            camera_info = self.captures[camera_id]
+            cap = camera_info['cap']
+            
+            if not cap:
                 now = time.time()
-                if now >= self.next_reconnect_time:
-                    logger.warning("Capteur RTSP absent, tentative de reconnexion...")
-                    return self._reconnect_camera()
+                if now >= camera_info['next_reconnect_time']:
+                    logger.warning(f"[{camera_id}] Capteur RTSP absent, tentative de reconnexion...")
+                    return self._reconnect_camera(camera_id)
                 return None
+                
             try:
                 # Si le flux est fermé, tenter une reconnexion (respecter la fenêtre)
-                if not self.cap.isOpened():
+                if not cap.isOpened():
                     now = time.time()
-                    if now >= self.next_reconnect_time:
-                        logger.warning("Capteur RTSP fermé, tentative de reconnexion immédiate...")
-                        return self._reconnect_camera()
+                    if now >= camera_info['next_reconnect_time']:
+                        logger.warning(f"[{camera_id}] Capteur RTSP fermé, tentative de reconnexion immédiate...")
+                        return self._reconnect_camera(camera_id)
                     return None
 
                 # Watchdog: si aucune frame fraîche depuis trop longtemps, forcer une reconnexion
                 stale_threshold = float(os.getenv('RTSP_STALE_THRESHOLD', '3.0'))
-                if self.last_frame_ts and stale_threshold > 0 and (time.time() - self.last_frame_ts) > stale_threshold:
+                if camera_info['last_frame_ts'] and stale_threshold > 0 and (time.time() - camera_info['last_frame_ts']) > stale_threshold:
                     now = time.time()
-                    if now >= self.next_reconnect_time:
-                        logger.warning(f"Aucune frame récente depuis {time.time() - self.last_frame_ts:.1f}s, tentative de reconnexion...")
-                        return self._reconnect_camera()
+                    if now >= camera_info['next_reconnect_time']:
+                        logger.warning(f"[{camera_id}] Aucune frame récente depuis {time.time() - camera_info['last_frame_ts']:.1f}s, tentative de reconnexion...")
+                        return self._reconnect_camera(camera_id)
 
                 # Pour RTSP, flush le buffer pour obtenir la frame la plus récente
                 ret = False
                 frame = None
                 for _ in range(3):
-                    ret, frame = self.cap.read()
+                    ret, frame = cap.read()
                     if not ret:
                         break
 
                 if ret and frame is not None and frame.size > 0:
-                    self.last_frame_ts = time.time()
+                    camera_info['last_frame_ts'] = time.time()
                     # reset compteur de reconnexion sur succès
-                    self.reconnect_attempts = 0
+                    camera_info['reconnect_attempts'] = 0
                     return frame
                 else:
                     # Plusieurs tentatives avec délai
-                    for _ in range(3):
-                        time.sleep(0.1)
-                        ret, frame = self.cap.read()
-                        if ret and frame is not None and frame.size > 0:
-                            self.last_frame_ts = time.time()
-                            self.reconnect_attempts = 0
-                            return frame
-
-                    # Si toujours échec, essayer de réinitialiser
-                    now = time.time()
-                    if now >= self.next_reconnect_time:
-                        logger.warning("Erreur de lecture RTSP, tentative de reconnexion...")
-                        return self._reconnect_camera()
-                    # Throttle des tentatives de reconnexion
+                    logger.warning(f"[{camera_id}] Échec de lecture de frame")
                     return None
-
+                    
             except Exception as e:
-                logger.exception(f"Exception lors de la lecture de la caméra: {e}")
-                now = time.time()
-                if now >= self.next_reconnect_time:
-                    return self._reconnect_camera()
+                logger.exception(f"[{camera_id}] Erreur lors de la lecture: {e}")
                 return None
     
-    def _reconnect_camera(self):
+    def _reconnect_camera(self, camera_id):
         """Tente de reconnecter la caméra avec backoff exponentiel et URL exacte"""
-        if not self.is_capturing:
+        if camera_id not in self.captures:
             return None
-        if self.current_url is None:
-            # Repli sur current_source si URL exacte inconnue
-            self.current_url = self.current_source
+            
+        camera_info = self.captures[camera_id]
         
         try:
             # Fermer la connexion actuelle
-            if self.cap:
+            if camera_info['cap']:
                 try:
-                    self.cap.release()
+                    camera_info['cap'].release()
                 except Exception:
                     pass
             
             max_tries = 3
             last_err = None
             for i in range(max_tries):
-                logger.info(f"🔄 Reconnexion RTSP (tentative {i+1}/{max_tries}) vers {str(self.current_url)[:50]}...")
-                cap = cv2.VideoCapture(self.current_url, cv2.CAP_FFMPEG)
+                logger.info(f"[{camera_id}] 🔄 Reconnexion RTSP (tentative {i+1}/{max_tries}) vers {str(camera_info['url'])[:50]}...")
+                cap = cv2.VideoCapture(camera_info['url'], cv2.CAP_FFMPEG)
                 if cap and cap.isOpened():
                     # Configurer: latence minimale sans forcer la résolution
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -349,11 +349,11 @@ class CameraService:
                     # Lire une image
                     ret, frame = cap.read()
                     if ret and frame is not None and frame.size > 0:
-                        self.cap = cap
-                        self.last_frame_ts = time.time()
-                        self.reconnect_attempts = 0
-                        self.next_reconnect_time = 0.0
-                        logger.info("✅ Caméra RTSP reconnectée avec succès")
+                        camera_info['cap'] = cap
+                        camera_info['last_frame_ts'] = time.time()
+                        camera_info['reconnect_attempts'] = 0
+                        camera_info['next_reconnect_time'] = 0.0
+                        logger.info(f"[{camera_id}] ✅ Caméra RTSP reconnectée avec succès")
                         return frame
                     else:
                         last_err = "read_failed"
@@ -368,12 +368,12 @@ class CameraService:
                 time.sleep(0.5)
             
             # Échec: programmer prochaine fenêtre de tentative
-            self.reconnect_attempts += 1
-            backoff = min(2 ** self.reconnect_attempts, 30)
-            self.next_reconnect_time = time.time() + backoff
-            logger.error(f"❌ Impossible de reconnecter la caméra (err={last_err}). Nouvelle tentative dans {backoff:.0f}s")
+            camera_info['reconnect_attempts'] += 1
+            backoff = min(2 ** camera_info['reconnect_attempts'], 30)
+            camera_info['next_reconnect_time'] = time.time() + backoff
+            logger.error(f"[{camera_id}] ❌ Impossible de reconnecter la caméra (err={last_err}). Nouvelle tentative dans {backoff:.0f}s")
             # S'assurer que cap sera réouvert proprement à la prochaine tentative
-            self.cap = None
+            camera_info['cap'] = None
             return None
         except Exception as e:
             self.reconnect_attempts += 1
@@ -387,13 +387,16 @@ class CameraService:
         """Vérifie si la capture est active"""
         return self.is_capturing
 
-    def get_source_fps(self):
+    def get_source_fps(self, camera_id):
         """Retourne le FPS de la source si disponible, sinon None"""
         try:
-            if self.cap and self.cap.isOpened():
-                fps = self.cap.get(cv2.CAP_PROP_FPS)
-                if fps and fps > 0 and fps < 240:
-                    return fps
+            if camera_id in self.captures:
+                camera_info = self.captures[camera_id]
+                cap = camera_info['cap']
+                if cap and cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    if fps and fps > 0 and fps < 240:
+                        return fps
         except Exception:
             pass
         return None
