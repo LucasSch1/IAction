@@ -19,6 +19,22 @@ from services.mqtt_service import get_mqtt_instance, MQTTService
 from services.detection_service import DetectionService
 from services.ha_service import HAService
 
+#TEST Introduction classe
+class CameraContext:
+    def __init__(self, camera_id):
+        self.camera_id = camera_id
+        self.current_frame = None
+        self.is_capturing = False
+        self.analysis_in_progress = False
+        self.last_analysis_time = 0
+        self.last_analysis_duration = 0
+        self.last_analysis_total_interval = 0
+        self.ai_consecutive_failures = 0
+
+camera_contexts = {}
+
+
+
 # Charger les variables d'environnement
 load_dotenv(override=True)  # Forcer le remplacement des variables d'environnement existantes
 # Format de logs unifié pour le CLI + niveau via env LOG_LEVEL
@@ -240,8 +256,18 @@ detection_service = DetectionService(ai_service, mqtt_service)
 
 # Variables globales
 current_frame = None
-is_capturing = False
-capture_thread = None
+ctx.is_capturing = True
+
+threading.Thread(
+    target=capture_loop,
+    args=(ctx,),
+    daemon=True
+).start()
+
+mqtt_service.publish_binary_sensor_state(
+    f"capture_active_{ctx.camera_id}", True
+)
+
 analysis_in_progress = False  # Indique si une analyse est en cours
 last_analysis_time = 0  # Timestamp de la dernière analyse terminée
 last_analysis_duration = 0  # Durée de la dernière analyse en secondes
@@ -388,85 +414,126 @@ def get_capture_status():
         'camera_active': camera_service.is_capturing if hasattr(camera_service, 'is_capturing') else False
     })
 
+#Modification multi-cam
 @app.route('/api/start_capture', methods=['POST'])
 def start_capture():
-    """Démarre la capture vidéo avec support amélioré"""
-    global is_capturing, capture_thread, ai_consecutive_failures
-    
+    """Démarre la capture vidéo pour une caméra donnée (multi-caméra)"""
     try:
-        data = request.json
-        source = data.get('source')
-        source_type = data.get('type')  # 'rtsp' ou 'ha_polling'
-        rtsp_url = data.get('rtsp_url')  # URL RTSP personnalisée (si RTSP)
-        
-        # Si non fourni, utiliser la config serveur
-        if not source_type:
-            source_type = os.getenv('CAPTURE_MODE', 'rtsp')
-        
-        logger.info(f"Tentative de démarrage - Type: {source_type}, Source: {source}, RTSP URL: {rtsp_url}")
-        
-        if is_capturing:
+        data = request.json or {}
+
+        camera_id = data.get('source')
+        source_type = data.get('type') or os.getenv('CAPTURE_MODE', 'rtsp')
+        rtsp_url = data.get('rtsp_url')
+
+        if not camera_id:
             return jsonify({
                 'success': False,
-                'error': 'Capture déjà en cours'
+                'error': 'source (camera_id) manquant'
             }), 400
-        
+
+        logger.info(f"[{camera_id}] Démarrage capture - type={source_type}, rtsp={rtsp_url}")
+
+        # Créer le contexte caméra si inexistant
+        if camera_id not in camera_contexts:
+            camera_contexts[camera_id] = CameraContext(camera_id)
+
+        ctx = camera_contexts[camera_id]
+
+        if ctx.is_capturing:
+            return jsonify({
+                'success': False,
+                'error': f'Caméra {camera_id} déjà en cours de capture'
+            }), 400
+
+        # =========================
+        # ===== MODE RTSP =========
+        # =========================
         if source_type == 'rtsp':
-            # Valider si nécessaire
             if rtsp_url:
                 is_valid, message = camera_service.validate_rtsp_url(rtsp_url)
                 if not is_valid:
-                    return jsonify({'success': False, 'error': f'URL RTSP invalide: {message}'}), 400
-            
-            # Démarrer RTSP
-            # Réinitialiser le compteur d'échecs IA au démarrage d'une nouvelle session
-            ai_consecutive_failures = 0
-            success = camera_service.start_capture(source, 'rtsp', rtsp_url)
+                    return jsonify({
+                        'success': False,
+                        'error': f'URL RTSP invalide: {message}'
+                    }), 400
+
+            ctx.ai_consecutive_failures = 0
+
+            success = camera_service.start_capture(camera_id, 'rtsp', rtsp_url)
             if not success:
-                return jsonify({'success': False, 'error': 'Impossible de démarrer la capture RTSP'}), 400
-            
-            is_capturing = True
-            capture_thread = threading.Thread(target=capture_loop, daemon=True)
-            capture_thread.start()
-            # Publier l'état de capture (ON)
+                return jsonify({
+                    'success': False,
+                    'error': 'Impossible de démarrer la capture RTSP'
+                }), 400
+
+            ctx.is_capturing = True
+
+            threading.Thread(
+                target=capture_loop,
+                args=(ctx,),
+                daemon=True
+            ).start()
+
+            # MQTT par caméra
             try:
-                mqtt_service.publish_binary_sensor_state('capture_active', True)
+                mqtt_service.publish_binary_sensor_state(
+                    f"capture_active_{camera_id}", True
+                )
             except Exception:
                 pass
-            
-            camera_info = camera_service.get_camera_info(source)
-            camera_name = camera_info['name'] if camera_info else f'Source {source}'
-            return jsonify({'success': True, 'message': f'Capture RTSP démarrée: {camera_name}', 'camera': camera_info})
-        
+
+            camera_info = camera_service.get_camera_info(camera_id)
+            return jsonify({
+                'success': True,
+                'message': f'Capture RTSP démarrée ({camera_id})',
+                'camera': camera_info
+            })
+
+        # =========================
+        # ===== MODE HA POLLING ===
+        # =========================
         elif source_type == 'ha_polling':
-            # S'assurer que la caméra RTSP est arrêtée
-            camera_service.stop_capture()
-            
-            # Vérifier config HA minimale
             if not os.getenv('HA_BASE_URL') or not os.getenv('HA_TOKEN') or not os.getenv('HA_ENTITY_ID'):
-                return jsonify({'success': False, 'error': 'Configuration HA incomplète (HA_BASE_URL, HA_TOKEN, HA_ENTITY_ID)'}), 400
-            
-            # Réinitialiser le compteur d'échecs IA au démarrage d'une nouvelle session
-            ai_consecutive_failures = 0
-            is_capturing = True
-            capture_thread = threading.Thread(target=ha_polling_loop, daemon=True)
-            capture_thread.start()
-            # Publier l'état de capture (ON)
+                return jsonify({
+                    'success': False,
+                    'error': 'Configuration HA incomplète'
+                }), 400
+
+            ctx.ai_consecutive_failures = 0
+            ctx.is_capturing = True
+
+            threading.Thread(
+                target=ha_polling_loop,
+                args=(ctx,),
+                daemon=True
+            ).start()
+
             try:
-                mqtt_service.publish_binary_sensor_state('capture_active', True)
+                mqtt_service.publish_binary_sensor_state(
+                    f"capture_active_{camera_id}", True
+                )
             except Exception:
                 pass
-            return jsonify({'success': True, 'message': 'Capture HA Polling démarrée', 'camera': None})
-        
+
+            return jsonify({
+                'success': True,
+                'message': f'Capture HA Polling démarrée ({camera_id})',
+                'camera': None
+            })
+
         else:
-            return jsonify({'success': False, 'error': f"Type de capture inconnu: {source_type}"}), 400
-        
+            return jsonify({
+                'success': False,
+                'error': f'Type de capture inconnu: {source_type}'
+            }), 400
+
     except Exception as e:
-        logger.error(f"Erreur lors du démarrage de la capture: {e}")
+        logger.exception("Erreur start_capture multi-caméra")
         return jsonify({
             'success': False,
             'error': str(e)
         }), 500
+
 
 @app.route('/api/stop_capture', methods=['POST'])
 def stop_capture():
@@ -692,7 +759,7 @@ def ha_polling_loop():
     service.run_loop(on_frame, is_running)
 
 
-def capture_loop():
+def capture_loop(ctx: CameraContext):
     """Boucle principale de capture RTSP"""
     global current_frame, is_capturing, analysis_in_progress, last_analysis_time, last_analysis_duration
     
@@ -723,7 +790,7 @@ def capture_loop():
             time.sleep(0.1)
 
 
-def analyze_frame(frame, start_time):
+def analyze_frame(ctx: CameraContext, frame, start_time)):
     """Analyse une image avec l'IA"""
     global analysis_in_progress, last_analysis_time, last_analysis_duration, last_analysis_total_interval, is_capturing, ai_consecutive_failures
     
