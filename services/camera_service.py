@@ -21,16 +21,23 @@ class CameraService:
         
         load_dotenv()
         
-        # Configuration RTSP
-        self.default_rtsp_urls = [
-            {
-                'name': 'RTSP Default',
-                'url': os.getenv('DEFAULT_RTSP_URL', ''),
-                'username': os.getenv('RTSP_USERNAME', ''),
-                'password': os.getenv('RTSP_PASSWORD', ''),
-                'enabled': bool(os.getenv('DEFAULT_RTSP_URL', ''))
-            }
-        ]
+        # Configuration RTSP - Support jusqu'à 6 caméras
+        self.default_rtsp_urls = []
+        for i in range(6):  # Support de 6 caméras maximum
+            url_key = f'DEFAULT_RTSP_URL_{i+1}' if i > 0 else 'DEFAULT_RTSP_URL'
+            username_key = f'RTSP_USERNAME_{i+1}' if i > 0 else 'RTSP_USERNAME' 
+            password_key = f'RTSP_PASSWORD_{i+1}' if i > 0 else 'RTSP_PASSWORD'
+            name_key = f'RTSP_NAME_{i+1}' if i > 0 else 'RTSP_NAME'
+            
+            url = os.getenv(url_key, '')
+            if url:  # N'ajouter que si l'URL est définie
+                self.default_rtsp_urls.append({
+                    'name': os.getenv(name_key, f'RTSP Camera {i+1}'),
+                    'url': url,
+                    'username': os.getenv(username_key, ''),
+                    'password': os.getenv(password_key, ''),
+                    'enabled': True
+                })
         
 
     
@@ -88,16 +95,21 @@ class CameraService:
         
         return rtsp_cameras
     
-    def _test_rtsp_connection(self, url, timeout=5):
-        """Test la connexion RTSP"""
+    def _test_rtsp_connection(self, url, timeout=3):
+        """Test la connexion RTSP avec timeout réduit pour tests multiples"""
         if not url:
             return 'not_configured'
         
         try:
-            cap = cv2.VideoCapture(url)
+            # Timeout plus court pour éviter les blocages lors de tests multiples
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # Définir un timeout court
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout * 1000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout * 1000)
             
             if cap.isOpened():
+                # Test de lecture rapide
                 ret, frame = cap.read()
                 cap.release()
                 return 'online' if ret and frame is not None else 'error'
@@ -410,16 +422,23 @@ class CameraService:
         except Exception:
             # Même sans dotenv, continuer avec os.environ
             pass
-        # Recharger la configuration par défaut RTSP
-        self.default_rtsp_urls = [
-            {
-                'name': 'RTSP Default',
-                'url': os.getenv('DEFAULT_RTSP_URL', ''),
-                'username': os.getenv('RTSP_USERNAME', ''),
-                'password': os.getenv('RTSP_PASSWORD', ''),
-                'enabled': bool(os.getenv('DEFAULT_RTSP_URL', ''))
-            }
-        ]
+        # Recharger la configuration RTSP multi-caméras
+        self.default_rtsp_urls = []
+        for i in range(6):  # Support de 6 caméras maximum
+            url_key = f'DEFAULT_RTSP_URL_{i+1}' if i > 0 else 'DEFAULT_RTSP_URL'
+            username_key = f'RTSP_USERNAME_{i+1}' if i > 0 else 'RTSP_USERNAME' 
+            password_key = f'RTSP_PASSWORD_{i+1}' if i > 0 else 'RTSP_PASSWORD'
+            name_key = f'RTSP_NAME_{i+1}' if i > 0 else 'RTSP_NAME'
+            
+            url = os.getenv(url_key, '')
+            if url:  # N'ajouter que si l'URL est définie
+                self.default_rtsp_urls.append({
+                    'name': os.getenv(name_key, f'RTSP Camera {i+1}'),
+                    'url': url,
+                    'username': os.getenv(username_key, ''),
+                    'password': os.getenv(password_key, ''),
+                    'enabled': True
+                })
         # Invalider le cache des caméras pour forcer le recalcul
         self.cameras_cache = None
         self.cache_time = 0
