@@ -624,9 +624,13 @@ def add_detection():
     name = data.get('name')
     phrase = data.get('phrase')
     webhook_url = data.get('webhook_url')  # Optionnel
+    enabled_cameras = data.get('enabled_cameras')  # Liste des caméras sélectionnées
     
     if not name or not phrase:
         return jsonify({'error': 'Nom et phrase requis'}), 400
+    
+    if enabled_cameras and not isinstance(enabled_cameras, list):
+        return jsonify({'error': 'enabled_cameras doit être une liste'}), 400
     
     # Valider l'URL du webhook si fournie
     if webhook_url:
@@ -643,28 +647,40 @@ def add_detection():
         except Exception:
             return jsonify({'error': 'URL webhook malformée'}), 400
     
-    detection_id = detection_service.add_detection(name, phrase, webhook_url)
+    detection_id = detection_service.add_detection(name, phrase, webhook_url, enabled_cameras)
     
     response_data = {'id': detection_id, 'status': 'Détection ajoutée'}
     if webhook_url:
         response_data['webhook_configured'] = True
         response_data['webhook_url'] = webhook_url
+    if enabled_cameras:
+        response_data['enabled_cameras'] = enabled_cameras
     
     return jsonify(response_data)
 
 @app.route('/api/detections/<detection_id>', methods=['PUT', 'PATCH'])
 def update_detection(detection_id):
-    """Met à jour une détection personnalisée (nom, phrase, webhook)"""
+    """Met à jour une détection personnalisée (nom, phrase, webhook, caméras)"""
     try:
         data = request.get_json() or {}
         name = data.get('name')
         phrase = data.get('phrase')
         webhook_url = data.get('webhook_url') if 'webhook_url' in data else None
+        enabled_cameras = data.get('enabled_cameras')  # Liste des caméras sélectionnées
 
-        if not any([name, phrase]) and 'webhook_url' not in data:
+        if not any([name, phrase]) and 'webhook_url' not in data and enabled_cameras is None:
             return jsonify({'error': 'Aucun champ à mettre à jour'}), 400
 
-        updated = detection_service.update_detection(detection_id, name=name, phrase=phrase, webhook_url=webhook_url)
+        if enabled_cameras is not None and not isinstance(enabled_cameras, list):
+            return jsonify({'error': 'enabled_cameras doit être une liste'}), 400
+
+        updated = detection_service.update_detection(
+            detection_id, 
+            name=name, 
+            phrase=phrase, 
+            webhook_url=webhook_url,
+            enabled_cameras=enabled_cameras
+        )
         if not updated:
             return jsonify({'error': 'Détection non trouvée'}), 404
 

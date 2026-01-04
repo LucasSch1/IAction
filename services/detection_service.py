@@ -28,35 +28,41 @@ class DetectionService:
         # Charger les détections sauvegardées
         self.load_detections()
     
-    def add_detection(self, name: str, phrase: str, webhook_url: Optional[str] = None) -> str:
+    def add_detection(self, name: str, phrase: str, webhook_url: Optional[str] = None, enabled_cameras: Optional[List[str]] = None) -> str:
         """Ajoute une nouvelle détection personnalisée avec webhook optionnel"""
         with self.lock:
             detection_id = str(uuid.uuid4())
+            
+            # Si aucune caméra spécifiée, utiliser toutes les caméras existantes
+            if enabled_cameras is None:
+                enabled_cameras = list(self.binary_sensor_states.keys())
             
             self.detections[detection_id] = {
                 'id': detection_id,
                 'name': name,
                 'phrase': phrase,
                 'webhook_url': webhook_url,
+                'enabled_cameras': enabled_cameras,
                 'created_at': time.time(),
                 'last_triggered': None,
                 'trigger_count': 0
             }
             
-            # Configurer les binary sensors MQTT pour chaque caméra existante
-            for camera_id in self.binary_sensor_states.keys():
-                sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
-                sensor_name = f"Détection {name} ({camera_id})"
-                self.mqtt_service.setup_binary_sensor(
-                    sensor_id=sensor_id,
-                    name=sensor_name,
-                    device_class="motion"
-                )
-                
-            # Initialiser l'état pour toutes les caméras existantes
-            for camera_id in self.binary_sensor_states.keys():
-                self.binary_sensor_states[camera_id][detection_id] = False
-            self.mqtt_service.buffer_binary_sensor_state(sensor_id, False)
+            # Configurer les binary sensors MQTT uniquement pour les caméras sélectionnées
+            for camera_id in enabled_cameras:
+                if camera_id in self.binary_sensor_states:
+                    sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                    sensor_name = f"Détection {name} ({camera_id})"
+                    self.mqtt_service.setup_binary_sensor(
+                        sensor_id=sensor_id,
+                        name=sensor_name,
+                        device_class="motion"
+                    )
+                    
+                    # Initialiser l'état pour cette caméra
+                    self.binary_sensor_states[camera_id][detection_id] = False
+                    self.mqtt_service.buffer_binary_sensor_state(sensor_id, False)
+            
             self.mqtt_service.flush_message_buffer()
             
             # Sauvegarder les détections
@@ -93,13 +99,15 @@ class DetectionService:
         with self.lock:
             return list(self.detections.values())
 
-    def update_detection(self, detection_id: str, name: Optional[str] = None, phrase: Optional[str] = None, webhook_url: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Met à jour une détection (nom, phrase, webhook)"""
+    def update_detection(self, detection_id: str, name: Optional[str] = None, phrase: Optional[str] = None, webhook_url: Optional[str] = None, enabled_cameras: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+        """Met à jour une détection (nom, phrase, webhook, caméras)"""
         with self.lock:
             if detection_id not in self.detections:
                 return None
             det = self.detections[detection_id]
             changed_name = False
+            changed_cameras = False
+            
             if name is not None and name.strip() and name != det.get('name'):
                 det['name'] = name.strip()
                 changed_name = True
@@ -109,14 +117,50 @@ class DetectionService:
             if webhook_url is not None:
                 webhook_url = webhook_url.strip()
                 det['webhook_url'] = webhook_url if webhook_url else None
-            # Reconfigurer le binary sensor si le nom a changé
+            
+            # Gérer les changements de caméras
+            if enabled_cameras is not None:
+                old_cameras = set(det.get('enabled_cameras', []))
+                new_cameras = set(enabled_cameras)
+                
+                if old_cameras != new_cameras:
+                    det['enabled_cameras'] = enabled_cameras
+                    changed_cameras = True
+                    
+                    # Supprimer les sensors des anciennes caméras
+                    for camera_id in old_cameras - new_cameras:
+                        if camera_id in self.binary_sensor_states:
+                            self.binary_sensor_states[camera_id].pop(detection_id, None)
+                    
+                    # Ajouter les sensors pour les nouvelles caméras
+                    for camera_id in new_cameras - old_cameras:
+                        if camera_id in self.binary_sensor_states:
+                            sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                            sensor_name = f"Détection {det['name']} ({camera_id})"
+                            self.mqtt_service.setup_binary_sensor(
+                                sensor_id=sensor_id,
+                                name=sensor_name,
+                                device_class="motion"
+                            )
+                            self.binary_sensor_states[camera_id][detection_id] = False
+                            self.mqtt_service.buffer_binary_sensor_state(sensor_id, False)
+            
+            # Reconfigurer les binary sensors si le nom a changé
             if changed_name:
-                sensor_id = f"detection_{detection_id.replace('-', '_')}"
-                self.mqtt_service.setup_binary_sensor(
-                    sensor_id=sensor_id,
-                    name=f"Détection: {det['name']}",
-                    device_class="motion"
-                )
+                enabled_cameras_list = det.get('enabled_cameras', list(self.binary_sensor_states.keys()))
+                for camera_id in enabled_cameras_list:
+                    if camera_id in self.binary_sensor_states:
+                        sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                        sensor_name = f"Détection {det['name']} ({camera_id})"
+                        self.mqtt_service.setup_binary_sensor(
+                            sensor_id=sensor_id,
+                            name=sensor_name,
+                            device_class="motion"
+                        )
+                        
+            if changed_cameras:
+                self.mqtt_service.flush_message_buffer()
+            
             self.save_detections()
             return det.copy()
     
@@ -156,13 +200,18 @@ class DetectionService:
             if camera_id not in self.binary_sensor_states:
                 self.binary_sensor_states[camera_id] = {}
             
-            # Récupérer la liste des détections personnalisées
+            # Récupérer la liste des détections personnalisées pour cette caméra
             with self.lock:
-                detections_list = [{
-                    'id': detection_id,
-                    'phrase': detection['phrase'],
-                    'name': detection['name']
-                } for detection_id, detection in self.detections.items()]
+                detections_list = []
+                for detection_id, detection in self.detections.items():
+                    enabled_cameras = detection.get('enabled_cameras', [])
+                    # Si aucune caméra spécifiée (ancienne détection) ou si cette caméra est dans la liste
+                    if not enabled_cameras or camera_id in enabled_cameras:
+                        detections_list.append({
+                            'id': detection_id,
+                            'phrase': detection['phrase'],
+                            'name': detection['name']
+                        })
             
             if not detections_list:
                 return {
@@ -257,18 +306,21 @@ class DetectionService:
         if camera_id not in self.binary_sensor_states:
             self.binary_sensor_states[camera_id] = {}
             
-            # Créer les sensors MQTT pour toutes les détections existantes
+            # Créer les sensors MQTT pour les détections qui incluent cette caméra
             with self.lock:
                 for detection_id, detection in self.detections.items():
-                    sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
-                    sensor_name = f"Détection {detection['name']} ({camera_id})"
-                    self.mqtt_service.setup_binary_sensor(
-                        sensor_id=sensor_id,
-                        name=sensor_name,
-                        device_class="motion"
-                    )
-                    # Initialiser l'état à False
-                    self.binary_sensor_states[camera_id][detection_id] = False
+                    enabled_cameras = detection.get('enabled_cameras', [])
+                    # Si la détection n'a pas de caméras spécifiées ou si cette caméra est dans la liste
+                    if not enabled_cameras or camera_id in enabled_cameras:
+                        sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                        sensor_name = f"Détection {detection['name']} ({camera_id})"
+                        self.mqtt_service.setup_binary_sensor(
+                            sensor_id=sensor_id,
+                            name=sensor_name,
+                            device_class="motion"
+                        )
+                        # Initialiser l'état à False
+                        self.binary_sensor_states[camera_id][detection_id] = False
     
     # Les méthodes _analyze_fixed_sensors et _analyze_custom_detections ont été supprimées
     # car elles sont remplacées par l'utilisation de la méthode analyze_combined du service AI

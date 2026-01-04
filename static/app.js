@@ -408,6 +408,10 @@ class IActionApp {
     if (title) title.textContent = "Ajouter une Détection";
     const saveBtn = document.getElementById("save-detection");
     if (saveBtn) saveBtn.textContent = "Sauvegarder";
+    
+    // Charger les caméras disponibles
+    this.loadCamerasForSelection();
+    
     this.addDetectionModal.show();
   }
 
@@ -430,6 +434,10 @@ class IActionApp {
     if (title) title.textContent = "Modifier une Détection";
     const saveBtn = document.getElementById("save-detection");
     if (saveBtn) saveBtn.textContent = "Mettre à jour";
+    
+    // Charger les caméras disponibles et sélectionner celles associées à la détection
+    this.loadCamerasForSelection(detection.enabled_cameras);
+    
     this.addDetectionModal.show();
   }
 
@@ -465,12 +473,22 @@ class IActionApp {
     }
 
     try {
+      // Récupérer les caméras sélectionnées
+      const selectedCameras = this.getSelectedCameras();
+      if (selectedCameras.length === 0) {
+        this.addLog("Au moins une caméra doit être sélectionnée", "warning");
+        return;
+      }
+
       // Corps de requête: en édition, envoyer uniquement ce qui est pertinent
       let requestBody = {};
       if (!this.editDetectionId || name) requestBody.name = name;
       if (!this.editDetectionId || phrase) requestBody.phrase = phrase;
       if (typeof webhookUrl !== "undefined")
         requestBody.webhook_url = webhookUrl;
+      
+      // Ajouter les caméras sélectionnées
+      requestBody.enabled_cameras = selectedCameras;
 
       let url = "/api/detections";
       let method = "POST";
@@ -1134,6 +1152,113 @@ class IActionApp {
       placeholder.style.display = "block";
       icon.className = "bi bi-eye";
     }
+  }
+
+  async loadCamerasForSelection(selectedCameras = null) {
+    try {
+      // Récupérer les caméras actives
+      const response = await fetch('/api/admin/cameras');
+      if (!response.ok) {
+        throw new Error('Erreur lors du chargement des caméras');
+      }
+      const data = await response.json();
+      
+      if (!data.success) {
+        throw new Error(data.error || 'Erreur inconnue');
+      }
+      
+      const cameras = Object.values(data.cameras || {});
+      const activeCameras = cameras.filter(cam => cam.is_capturing);
+      
+      this.populateCameraSelection(activeCameras, selectedCameras);
+      
+    } catch (error) {
+      console.error('Erreur lors du chargement des caméras:', error);
+      this.addLog('Erreur lors du chargement des caméras: ' + error.message, 'error');
+    }
+  }
+
+  populateCameraSelection(cameras, selectedCameras = null) {
+    const individualCamerasContainer = document.getElementById('individual-cameras');
+    const selectAllCheckbox = document.getElementById('select-all-cameras');
+    
+    if (!individualCamerasContainer || !selectAllCheckbox) return;
+    
+    // Vider le container
+    individualCamerasContainer.innerHTML = '';
+    
+    if (cameras.length === 0) {
+      individualCamerasContainer.innerHTML = '<div class="text-muted"><em>Aucune caméra active</em></div>';
+      selectAllCheckbox.checked = false;
+      selectAllCheckbox.disabled = true;
+      return;
+    }
+    
+    // Si pas de sélection spécifique, sélectionner toutes les caméras
+    const shouldSelectAll = selectedCameras === null || selectedCameras === undefined;
+    
+    // Créer les checkboxes pour chaque caméra
+    cameras.forEach(camera => {
+      const isSelected = shouldSelectAll || (selectedCameras && selectedCameras.includes(camera.id));
+      
+      const cameraCheckbox = document.createElement('div');
+      cameraCheckbox.className = 'form-check';
+      cameraCheckbox.innerHTML = `
+        <input
+          class="form-check-input camera-checkbox"
+          type="checkbox"
+          id="camera-${camera.id}"
+          value="${camera.id}"
+          ${isSelected ? 'checked' : ''}
+        />
+        <label class="form-check-label" for="camera-${camera.id}">
+          ${camera.id}
+        </label>
+      `;
+      
+      individualCamerasContainer.appendChild(cameraCheckbox);
+    });
+    
+    // Gérer la logique "Toutes les caméras"
+    selectAllCheckbox.disabled = false;
+    selectAllCheckbox.checked = shouldSelectAll;
+    
+    // Event listeners
+    selectAllCheckbox.addEventListener('change', (e) => {
+      const cameraCheckboxes = document.querySelectorAll('.camera-checkbox');
+      cameraCheckboxes.forEach(checkbox => {
+        checkbox.checked = e.target.checked;
+      });
+    });
+    
+    // Event listeners pour les caméras individuelles
+    const cameraCheckboxes = document.querySelectorAll('.camera-checkbox');
+    cameraCheckboxes.forEach(checkbox => {
+      checkbox.addEventListener('change', () => {
+        const allChecked = Array.from(cameraCheckboxes).every(cb => cb.checked);
+        const noneChecked = Array.from(cameraCheckboxes).every(cb => !cb.checked);
+        
+        if (allChecked) {
+          selectAllCheckbox.checked = true;
+          selectAllCheckbox.indeterminate = false;
+        } else if (noneChecked) {
+          selectAllCheckbox.checked = false;
+          selectAllCheckbox.indeterminate = false;
+        } else {
+          selectAllCheckbox.checked = false;
+          selectAllCheckbox.indeterminate = true;
+        }
+      });
+    });
+  }
+
+  getSelectedCameras() {
+    const cameraCheckboxes = document.querySelectorAll('.camera-checkbox');
+    const selectedCameras = Array.from(cameraCheckboxes)
+      .filter(checkbox => checkbox.checked)
+      .map(checkbox => checkbox.value);
+    
+    return selectedCameras;
   }
 }
 

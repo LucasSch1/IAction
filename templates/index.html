@@ -287,6 +287,29 @@
                 </div>
               </div>
               <div class="mb-3">
+                <label class="form-label">Caméras actives</label>
+                <div id="camera-selection">
+                  <div class="form-check">
+                    <input
+                      class="form-check-input"
+                      type="checkbox"
+                      id="select-all-cameras"
+                      checked
+                    />
+                    <label class="form-check-label" for="select-all-cameras">
+                      <strong>Toutes les caméras</strong>
+                    </label>
+                  </div>
+                  <hr class="my-2" />
+                  <div id="individual-cameras">
+                    <!-- Les caméras individuelles seront ajoutées ici dynamiquement -->
+                  </div>
+                </div>
+                <div class="form-text">
+                  <i class="bi bi-info-circle"></i> Sélectionnez les caméras sur lesquelles appliquer cette détection
+                </div>
+              </div>
+              <div class="mb-3">
                 <label for="detection-webhook" class="form-label"
                   >Webhook URL
                   <span class="text-muted">(optionnel)</span></label
