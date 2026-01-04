@@ -1229,6 +1229,125 @@ def get_cameras_status():
             'error': str(e)
         }), 500
 
+@app.route('/api/admin/cameras/test_multiple', methods=['POST'])
+def test_multiple_cameras():
+    """Teste la connexion de plusieurs caméras sans les démarrer"""
+    try:
+        data = request.json or {}
+        cameras_config = data.get('cameras', [])
+        
+        if not cameras_config:
+            return jsonify({
+                'success': False,
+                'error': 'Aucune caméra à tester'
+            }), 400
+        
+        results = []
+        
+        for camera_config in cameras_config:
+            camera_id = camera_config.get('id', 'unknown')
+            camera_name = camera_config.get('name', f'Caméra {camera_id}')
+            mode = camera_config.get('mode', 'rtsp')
+            
+            try:
+                if mode == 'rtsp':
+                    rtsp_url = camera_config.get('rtsp_url')
+                    if not rtsp_url:
+                        results.append({
+                            'camera_id': camera_id,
+                            'camera_name': camera_name,
+                            'success': False,
+                            'status': 'not_configured',
+                            'message': 'URL RTSP manquante'
+                        })
+                        continue
+                    
+                    # Test de connexion RTSP (sans démarrer l'analyse)
+                    if hasattr(camera_service, '_test_rtsp_connection'):
+                        test_status = camera_service._test_rtsp_connection(rtsp_url)
+                    else:
+                        test_status = 'unsupported'
+                    
+                    results.append({
+                        'camera_id': camera_id,
+                        'camera_name': camera_name,
+                        'success': test_status == 'online',
+                        'status': test_status,
+                        'message': f'Test RTSP: {test_status}',
+                        'url': rtsp_url
+                    })
+                    
+                elif mode == 'ha_polling':
+                    ha_entity = camera_config.get('ha_entity')
+                    if not ha_entity:
+                        results.append({
+                            'camera_id': camera_id,
+                            'camera_name': camera_name,
+                            'success': False,
+                            'status': 'not_configured',
+                            'message': 'Entité Home Assistant manquante'
+                        })
+                        continue
+                    
+                    # Test basique de configuration HA
+                    ha_url = os.getenv('HA_URL', '')
+                    ha_token = os.getenv('HA_TOKEN', '')
+                    
+                    if not ha_url or not ha_token:
+                        results.append({
+                            'camera_id': camera_id,
+                            'camera_name': camera_name,
+                            'success': False,
+                            'status': 'not_configured',
+                            'message': 'Configuration Home Assistant incomplète'
+                        })
+                        continue
+                    
+                    results.append({
+                        'camera_id': camera_id,
+                        'camera_name': camera_name,
+                        'success': True,
+                        'status': 'configured',
+                        'message': f'Configuration HA OK: {ha_entity}'
+                    })
+                    
+                else:
+                    results.append({
+                        'camera_id': camera_id,
+                        'camera_name': camera_name,
+                        'success': False,
+                        'status': 'error',
+                        'message': f'Mode non supporté: {mode}'
+                    })
+                    
+            except Exception as e:
+                results.append({
+                    'camera_id': camera_id,
+                    'camera_name': camera_name,
+                    'success': False,
+                    'status': 'error',
+                    'message': f'Erreur test: {str(e)}'
+                })
+        
+        success_count = sum(1 for r in results if r['success'])
+        total_count = len(results)
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'summary': {
+                'total': total_count,
+                'success': success_count,
+                'failed': total_count - success_count
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/api/admin/cameras/start_multiple', methods=['POST'])
 def start_multiple_cameras():
     """Démarre plusieurs caméras depuis la configuration admin"""
