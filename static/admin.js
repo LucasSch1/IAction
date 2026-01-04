@@ -135,6 +135,17 @@ class AdminApp {
                 }
             });
         }
+
+        // Bouton tester caméras
+        const testCamerasBtn = document.getElementById('test-cameras');
+        if (testCamerasBtn) {
+            testCamerasBtn.addEventListener('click', () => this.testCameras());
+        }
+
+        // Bouton ajouter caméra
+        document.getElementById('add-camera').addEventListener('click', () => {
+            this.addCameraConfig();
+        });
     }
 
     setupFormValidation() {
@@ -252,6 +263,9 @@ class AdminApp {
             // Puis remplir le formulaire (validation respectera la visibilité)
             this.populateForm(config);
             
+            // Charger les caméras supplémentaires
+            this.loadCamerasConfiguration();
+            
             this.addLog('✅ Configuration chargée avec succès', 'success');
         } catch (error) {
             this.addLog(`❌ Erreur lors du chargement: ${error.message}`, 'error');
@@ -280,6 +294,12 @@ class AdminApp {
             
             for (let [key, value] of formData.entries()) {
                 config[key] = value;
+            }
+            
+            // Sauvegarder les caméras supplémentaires
+            const additionalCameras = this.saveCamerasConfiguration();
+            if (additionalCameras.length > 0) {
+                config['ADDITIONAL_CAMERAS'] = JSON.stringify(additionalCameras);
             }
             
             // Validation côté client
@@ -479,6 +499,91 @@ class AdminApp {
         }
     }
 
+    async testCameras() {
+        const btn = document.getElementById('test-cameras');
+        this.setBadge('test-cameras-status', 'loading', '...');
+        if (btn) btn.disabled = true;
+        
+        try {
+            this.addLog('📹 Test des caméras configurées...', 'info');
+            
+            // Collecter toutes les caméras configurées
+            const cameras = this.saveCamerasConfiguration();
+            
+            if (cameras.length === 0) {
+                this.setBadge('test-cameras-status', 'info', 'N/C', 'Aucune caméra configurée');
+                this.addLog('⚠️ Aucune caméra supplémentaire configurée', 'warning');
+                return;
+            }
+            
+            // Préparer les données de test pour chaque caméra
+            const camerasToTest = cameras.map(camera => {
+                const cameraId = camera[`${camera.id}_id`] || camera.id;
+                const mode = camera[`${camera.id}_mode`] || 'rtsp';
+                const name = camera[`${camera.id}_name`] || `Caméra ${cameraId}`;
+                
+                let config = {
+                    id: cameraId,
+                    name: name,
+                    mode: mode
+                };
+                
+                if (mode === 'rtsp') {
+                    config.rtsp_url = camera[`${camera.id}_rtsp_url`];
+                    config.rtsp_username = camera[`${camera.id}_rtsp_username`];
+                    config.rtsp_password = camera[`${camera.id}_rtsp_password`];
+                } else if (mode === 'ha_polling') {
+                    config.ha_entity = camera[`${camera.id}_ha_entity`];
+                    config.ha_attr = camera[`${camera.id}_ha_attr`];
+                    config.ha_interval = camera[`${camera.id}_ha_interval`];
+                }
+                
+                return config;
+            });
+            
+            this.addLog(`Tentative de démarrage de ${camerasToTest.length} caméra(s)...`, 'info');
+            
+            const res = await this.fetchWithTimeout('/api/admin/cameras/start_multiple', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cameras: camerasToTest }),
+                timeout: 15000
+            });
+            
+            const data = await res.json();
+            
+            if (data.success) {
+                const successCount = data.results.filter(r => r.success).length;
+                const totalCount = data.results.length;
+                
+                if (successCount === totalCount) {
+                    this.setBadge('test-cameras-status', 'ok', `${successCount}/${totalCount}`, 'Toutes les caméras démarrées');
+                    this.addLog(`✅ ${successCount}/${totalCount} caméra(s) démarrée(s) avec succès`, 'success');
+                } else {
+                    this.setBadge('test-cameras-status', 'warning', `${successCount}/${totalCount}`, 'Démarrage partiel');
+                    this.addLog(`⚠️ ${successCount}/${totalCount} caméra(s) démarrée(s)`, 'warning');
+                }
+                
+                // Détail des résultats
+                data.results.forEach(result => {
+                    const status = result.success ? 'success' : 'error';
+                    const icon = result.success ? '✅' : '❌';
+                    this.addLog(`${icon} ${result.camera_id}: ${result.message}`, status);
+                });
+                
+            } else {
+                this.setBadge('test-cameras-status', 'error', 'KO', data.error || 'Erreur inconnue');
+                this.addLog(`❌ Erreur test caméras: ${data.error}`, 'error');
+            }
+            
+        } catch (e) {
+            this.setBadge('test-cameras-status', 'error', 'KO', e.message);
+            this.addLog(`❌ Erreur test caméras: ${e.message}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     addLog(message, type = 'info') {
         // UI logs supprimés: sortie console uniquement selon niveau
         if (!this.shouldLog(type)) return;
@@ -528,9 +633,166 @@ class AdminApp {
         else if (type === 'debug') console.debug(line, style, message);
         else console.log(line, style, message);
     }
+
+    // Gestion des caméras multiples
+    addCameraConfig() {
+        const container = document.getElementById('additional-cameras');
+        const cameraCount = container.children.length;
+        const cameraId = `camera_${cameraCount + 1}`;
+        
+        const cameraDiv = document.createElement('div');
+        cameraDiv.className = 'card mb-3';
+        cameraDiv.setAttribute('data-camera-id', cameraId);
+        
+        cameraDiv.innerHTML = `
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h6 class="mb-0"><i class="bi bi-camera-video"></i> Caméra ${cameraCount + 1}</h6>
+                <button type="button" class="btn btn-outline-danger btn-sm" onclick="adminApp.removeCameraConfig('${cameraId}')">
+                    <i class="bi bi-trash"></i> Supprimer
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <label class="form-label">Nom de la caméra</label>
+                        <input type="text" class="form-control" name="${cameraId}_name" placeholder="ex: Caméra Entrée" value="Caméra ${cameraCount + 1}">
+                        <div class="form-text">Nom d'affichage de la caméra</div>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">Mode de capture</label>
+                        <select class="form-select" name="${cameraId}_mode" onchange="adminApp.toggleCameraCaptureMode('${cameraId}', this.value)">
+                            <option value="rtsp">RTSP</option>
+                            <option value="ha_polling">HA Polling</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label">ID de la caméra (technique)</label>
+                        <input type="text" class="form-control" name="${cameraId}_id" placeholder="ex: cam_entree" value="${cameraId}">
+                        <div class="form-text">Identifiant unique pour l'API</div>
+                    </div>
+                </div>
+                
+                <!-- Configuration RTSP -->
+                <div class="rtsp-config mt-3" id="${cameraId}_rtsp_config">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <label class="form-label">URL RTSP</label>
+                            <input type="url" class="form-control" name="${cameraId}_rtsp_url" placeholder="rtsp://192.168.1.100:554/stream">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Utilisateur RTSP</label>
+                            <input type="text" class="form-control" name="${cameraId}_rtsp_username">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Mot de passe RTSP</label>
+                            <input type="password" class="form-control" name="${cameraId}_rtsp_password">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Configuration HA Polling -->
+                <div class="ha-config mt-3" id="${cameraId}_ha_config" style="display: none;">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <label class="form-label">Entity ID</label>
+                            <input type="text" class="form-control" name="${cameraId}_ha_entity" placeholder="camera.entree">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Attribut image</label>
+                            <input type="text" class="form-control" name="${cameraId}_ha_attr" value="entity_picture">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Intervalle (s)</label>
+                            <input type="number" class="form-control" name="${cameraId}_ha_interval" value="1.0" min="0.5" step="0.5">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.appendChild(cameraDiv);
+        this.addLog(`Caméra "${cameraId}" ajoutée`, 'success');
+    }
+
+    removeCameraConfig(cameraId) {
+        const cameraDiv = document.querySelector(`[data-camera-id="${cameraId}"]`);
+        if (cameraDiv) {
+            cameraDiv.remove();
+            this.addLog(`Caméra "${cameraId}" supprimée`, 'info');
+        }
+    }
+
+    toggleCameraCaptureMode(cameraId, mode) {
+        const rtspConfig = document.getElementById(`${cameraId}_rtsp_config`);
+        const haConfig = document.getElementById(`${cameraId}_ha_config`);
+        
+        if (mode === 'rtsp') {
+            rtspConfig.style.display = 'block';
+            haConfig.style.display = 'none';
+        } else if (mode === 'ha_polling') {
+            rtspConfig.style.display = 'none';
+            haConfig.style.display = 'block';
+        }
+    }
+
+    loadCamerasConfiguration() {
+        // Cette méthode sera appelée pour charger les caméras existantes depuis le backend
+        // Pour l'instant, nous utilisons localStorage comme exemple
+        const savedCameras = localStorage.getItem('additional_cameras');
+        if (savedCameras) {
+            try {
+                const cameras = JSON.parse(savedCameras);
+                cameras.forEach(camera => {
+                    this.addCameraConfig();
+                    // Remplir les champs avec les données sauvegardées
+                    this.populateCameraFields(camera);
+                });
+            } catch (e) {
+                console.error('Erreur lors du chargement des caméras:', e);
+            }
+        }
+    }
+
+    populateCameraFields(camera) {
+        // Remplit les champs d'une caméra avec les données fournies
+        Object.keys(camera).forEach(key => {
+            const input = document.querySelector(`[name="${key}"]`);
+            if (input) {
+                input.value = camera[key];
+            }
+        });
+    }
+
+    saveCamerasConfiguration() {
+        // Collecte la configuration de toutes les caméras supplémentaires
+        const cameras = [];
+        const cameraElements = document.querySelectorAll('[data-camera-id]');
+        
+        cameraElements.forEach(cameraDiv => {
+            const cameraId = cameraDiv.getAttribute('data-camera-id');
+            const camera = { id: cameraId };
+            
+            // Collecter tous les champs de cette caméra
+            const inputs = cameraDiv.querySelectorAll('input, select');
+            inputs.forEach(input => {
+                if (input.name && input.value) {
+                    camera[input.name] = input.value;
+                }
+            });
+            
+            cameras.push(camera);
+        });
+        
+        // Sauvegarder temporairement dans localStorage
+        // TODO: Implémenter la sauvegarde côté serveur
+        localStorage.setItem('additional_cameras', JSON.stringify(cameras));
+        
+        return cameras;
+    }
 }
 
 // Initialiser l'application d'administration
+let adminApp;
 document.addEventListener('DOMContentLoaded', () => {
-    new AdminApp();
+    adminApp = new AdminApp();
 });

@@ -1203,6 +1203,129 @@ def save_admin_config():
             'error': f'Erreur lors de la sauvegarde: {str(e)}'
         }), 500
 
+@app.route('/api/admin/cameras', methods=['GET'])
+def get_cameras_status():
+    """Récupère le statut de toutes les caméras configurées"""
+    try:
+        cameras_status = {}
+        for camera_id, ctx in camera_contexts.items():
+            cameras_status[camera_id] = {
+                'id': camera_id,
+                'is_capturing': ctx.is_capturing,
+                'last_analysis_time': ctx.last_analysis_time,
+                'last_analysis_duration': ctx.last_analysis_duration,
+                'analysis_in_progress': ctx.analysis_in_progress
+            }
+        
+        return jsonify({
+            'success': True,
+            'cameras': cameras_status,
+            'total_cameras': len(camera_contexts),
+            'active_cameras': len([ctx for ctx in camera_contexts.values() if ctx.is_capturing])
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/admin/cameras/start_multiple', methods=['POST'])
+def start_multiple_cameras():
+    """Démarre plusieurs caméras depuis la configuration admin"""
+    try:
+        data = request.json or {}
+        cameras_config = data.get('cameras', [])
+        
+        if not cameras_config:
+            return jsonify({
+                'success': False,
+                'error': 'Aucune caméra à démarrer'
+            }), 400
+        
+        results = []
+        
+        for camera_config in cameras_config:
+            camera_id = camera_config.get('id', 'unknown')
+            try:
+                # Créer le contexte caméra si inexistant
+                if camera_id not in camera_contexts:
+                    camera_contexts[camera_id] = CameraContext(camera_id)
+                
+                ctx = camera_contexts[camera_id]
+                
+                if ctx.is_capturing:
+                    results.append({
+                        'camera_id': camera_id,
+                        'success': False,
+                        'message': f'Caméra {camera_id} déjà en cours'
+                    })
+                    continue
+                
+                mode = camera_config.get('mode', 'rtsp')
+                
+                if mode == 'rtsp':
+                    rtsp_url = camera_config.get('rtsp_url')
+                    if not rtsp_url:
+                        results.append({
+                            'camera_id': camera_id,
+                            'success': False,
+                            'message': 'URL RTSP manquante'
+                        })
+                        continue
+                    
+                    success = camera_service.start_capture(camera_id, rtsp_url, 'rtsp')
+                    if not success:
+                        results.append({
+                            'camera_id': camera_id,
+                            'success': False,
+                            'message': 'Échec démarrage RTSP'
+                        })
+                        continue
+                    
+                    ctx.is_capturing = True
+                    threading.Thread(target=capture_loop, args=(ctx,), daemon=True).start()
+                    
+                    try:
+                        mqtt_service.publish_binary_sensor_state(f"capture_active_{camera_id}", True)
+                    except Exception:
+                        pass
+                    
+                    results.append({
+                        'camera_id': camera_id,
+                        'success': True,
+                        'message': f'RTSP démarré pour {camera_id}'
+                    })
+                    
+                elif mode == 'ha_polling':
+                    # Configuration HA polling pour cette caméra spécifique
+                    # TODO: Implémenter le support HA polling multi-caméra
+                    results.append({
+                        'camera_id': camera_id,
+                        'success': False,
+                        'message': 'HA Polling multi-caméra pas encore implémenté'
+                    })
+                
+            except Exception as e:
+                results.append({
+                    'camera_id': camera_id,
+                    'success': False,
+                    'message': f'Erreur: {str(e)}'
+                })
+        
+        success_count = len([r for r in results if r['success']])
+        
+        return jsonify({
+            'success': True,
+            'message': f'{success_count}/{len(results)} caméras démarrées',
+            'results': results
+        })
+        
+    except Exception as e:
+        logger.exception("Erreur start_multiple_cameras")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 @app.route('/api/admin/restart', methods=['POST'])
