@@ -872,6 +872,9 @@ class AdminApp {
 
   loadCamerasConfiguration() {
     // Cette méthode sera appelée pour charger les caméras existantes depuis le backend
+    // D'abord, nettoyer les caméras existantes pour éviter les doublons
+    this.clearExistingCameras();
+    
     // Pour l'instant, nous utilisons localStorage comme exemple
     const savedCameras = localStorage.getItem("additional_cameras");
     if (savedCameras) {
@@ -885,6 +888,14 @@ class AdminApp {
       } catch (e) {
         console.error("Erreur lors du chargement des caméras:", e);
       }
+    }
+  }
+
+  clearExistingCameras() {
+    // Supprimer tous les champs de caméras existants
+    const camerasContainer = document.getElementById("cameras-container");
+    if (camerasContainer) {
+      camerasContainer.innerHTML = '';
     }
   }
 
