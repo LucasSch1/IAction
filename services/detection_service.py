@@ -76,9 +76,14 @@ class DetectionService:
             if detection_id not in self.detections:
                 return False
             
-            # Supprimer le binary sensor MQTT
-            sensor_id = f"detection_{detection_id.replace('-', '_')}"
-            self.mqtt_service.remove_sensor(sensor_id, "binary_sensor")
+            # Supprimer tous les binary sensors MQTT de toutes les caméras
+            detection = self.detections[detection_id]
+            enabled_cameras = detection.get('enabled_cameras', list(self.binary_sensor_states.keys()))
+            
+            for camera_id in enabled_cameras:
+                if camera_id in self.binary_sensor_states:
+                    sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                    self.mqtt_service.remove_sensor(sensor_id, "binary_sensor")
             
             # Supprimer de nos structures
             del self.detections[detection_id]
@@ -130,6 +135,10 @@ class DetectionService:
                     # Supprimer les sensors des anciennes caméras
                     for camera_id in old_cameras - new_cameras:
                         if camera_id in self.binary_sensor_states:
+                            # Supprimer le sensor MQTT de Home Assistant
+                            sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                            self.mqtt_service.remove_sensor(sensor_id, "binary_sensor")
+                            # Supprimer de notre état local
                             self.binary_sensor_states[camera_id].pop(detection_id, None)
                     
                     # Ajouter les sensors pour les nouvelles caméras
@@ -322,6 +331,55 @@ class DetectionService:
                         # Initialiser l'état à False
                         self.binary_sensor_states[camera_id][detection_id] = False
     
+    def cleanup_mqtt_sensors(self):
+        """Nettoie les sensors MQTT obsolètes et synchronise avec l'état actuel"""
+        logger.info("🧹 Nettoyage des sensors MQTT...")
+        
+        with self.lock:
+            # Pour chaque caméra enregistrée
+            for camera_id in list(self.binary_sensor_states.keys()):
+                # Pour chaque détection dans les états de cette caméra
+                for detection_id in list(self.binary_sensor_states[camera_id].keys()):
+                    if detection_id not in self.detections:
+                        # Détection supprimée - nettoyer le sensor
+                        sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                        logger.info(f"🗑️ Suppression sensor orphelin: {sensor_id}")
+                        self.mqtt_service.remove_sensor(sensor_id, "binary_sensor")
+                        del self.binary_sensor_states[camera_id][detection_id]
+                    else:
+                        # Vérifier si cette caméra est toujours activée pour cette détection
+                        detection = self.detections[detection_id]
+                        enabled_cameras = detection.get('enabled_cameras', [])
+                        
+                        # Si la détection a des caméras spécifiées et cette caméra n'y est pas
+                        if enabled_cameras and camera_id not in enabled_cameras:
+                            sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                            logger.info(f"🗑️ Suppression sensor désactivé: {sensor_id}")
+                            self.mqtt_service.remove_sensor(sensor_id, "binary_sensor")
+                            del self.binary_sensor_states[camera_id][detection_id]
+            
+            # S'assurer que toutes les détections ont leurs sensors sur les bonnes caméras
+            for detection_id, detection in self.detections.items():
+                enabled_cameras = detection.get('enabled_cameras', list(self.binary_sensor_states.keys()))
+                
+                for camera_id in enabled_cameras:
+                    if camera_id in self.binary_sensor_states:
+                        if detection_id not in self.binary_sensor_states[camera_id]:
+                            # Ajouter le sensor manquant
+                            sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                            sensor_name = f"Détection {detection['name']} ({camera_id})"
+                            logger.info(f"➕ Ajout sensor manquant: {sensor_id}")
+                            self.mqtt_service.setup_binary_sensor(
+                                sensor_id=sensor_id,
+                                name=sensor_name,
+                                device_class="motion"
+                            )
+                            self.binary_sensor_states[camera_id][detection_id] = False
+                            self.mqtt_service.buffer_binary_sensor_state(sensor_id, False)
+            
+            self.mqtt_service.flush_message_buffer()
+            logger.info("✅ Nettoyage des sensors MQTT terminé")
+    
     # Les méthodes _analyze_fixed_sensors et _analyze_custom_detections ont été supprimées
     # car elles sont remplacées par l'utilisation de la méthode analyze_combined du service AI
     
@@ -431,6 +489,7 @@ class DetectionService:
                     'name': detection.get('name', ''),
                     'phrase': detection.get('phrase', ''),
                     'webhook_url': detection.get('webhook_url'),
+                    'enabled_cameras': detection.get('enabled_cameras', []),  # Nouveau champ
                     'created_at': detection.get('created_at', time.time()),
                     'last_triggered': detection.get('last_triggered'),
                     'trigger_count': detection.get('trigger_count', 0)
@@ -472,19 +531,29 @@ class DetectionService:
             logger.debug(f"Webhook échec pour '{detection_name}' → {webhook_url}: {e}")
     
     def reconfigure_mqtt_sensors(self):
-        """Reconfigure les binary sensors MQTT pour toutes les détections (utile après connexion MQTT)."""
+        """Reconfigure les binary sensors MQTT pour toutes les détections et nettoie les sensors obsolètes"""
         try:
+            # D'abord nettoyer les sensors obsolètes
+            self.cleanup_mqtt_sensors()
+            
+            # Puis reconfigurer tous les sensors actifs
             with self.lock:
                 for detection_id, detection in self.detections.items():
-                    sensor_id = f"detection_{detection_id.replace('-', '_')}"
-                    self.mqtt_service.setup_binary_sensor(
-                        sensor_id=sensor_id,
-                        name=f"Détection: {detection['name']}",
-                        device_class="motion"
-                    )
-                    # Publier l'état courant (par défaut False si inconnu)
-                    current_state = self.binary_sensor_states.get(detection_id, False)
-                    self.mqtt_service.buffer_binary_sensor_state(sensor_id, current_state)
+                    enabled_cameras = detection.get('enabled_cameras', list(self.binary_sensor_states.keys()))
+                    
+                    for camera_id in enabled_cameras:
+                        if camera_id in self.binary_sensor_states:
+                            sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                            sensor_name = f"Détection {detection['name']} ({camera_id})"
+                            self.mqtt_service.setup_binary_sensor(
+                                sensor_id=sensor_id,
+                                name=sensor_name,
+                                device_class="motion"
+                            )
+                            # Publier l'état courant (par défaut False)
+                            current_state = self.binary_sensor_states[camera_id].get(detection_id, False)
+                            self.mqtt_service.buffer_binary_sensor_state(sensor_id, current_state)
+                            
             self.mqtt_service.flush_message_buffer()
             logger.info("✅ Reconfiguration MQTT des détections terminée")
         except Exception as e:
