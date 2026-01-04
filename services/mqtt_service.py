@@ -337,7 +337,6 @@ class MQTTService:
             "payload_off": "OFF",
             "device": self.DEVICE_INFO
         }
-        }
         
         try:
             self.client.publish(config_topic, json.dumps(config_payload), retain=True)
