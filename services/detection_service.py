@@ -115,9 +115,13 @@ class DetectionService:
             self.save_detections()
             return det.copy()
     
-    def analyze_frame(self, image_base64: str) -> dict:
+    def analyze_frame(self, image_base64: str, camera_id: str = "default") -> dict:
         """Analyse une image avec toutes les détections configurées
         
+        Args:
+            image_base64: Image encodée en base64
+            camera_id: Identifiant de la caméra (pour logs et MQTT)
+            
         Returns:
             dict: Résultats de l'analyse avec la clé 'detections' uniquement
         """
@@ -220,7 +224,7 @@ class DetectionService:
             return results
             
         except Exception as e:
-            logger.error(f"Erreur lors de l'analyse de l'image: {e}")
+            logger.error(f"[{camera_id}] Erreur lors de l'analyse de l'image: {e}")
             results['success'] = False
             results['error'] = str(e)
             return results

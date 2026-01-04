@@ -116,6 +116,18 @@ class MQTTService:
 
     def connect(self):
         """Établit la connexion au broker MQTT"""
+        # Éviter les connexions multiples
+        if self.client and self.is_connected:
+            return True
+            
+        # Fermer l'ancien client s'il existe
+        if self.client:
+            try:
+                self.client.loop_stop()
+                self.client.disconnect()
+            except Exception:
+                pass
+        
         print(f"Connexion à {self.broker}:{self.port} (client: {self.client_id})")
         
         self.client = mqtt.Client(client_id=self.client_id, protocol=mqtt.MQTTv311, clean_session=False)
