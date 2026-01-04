@@ -558,10 +558,23 @@ class IActionApp {
   }
 
   startStatusUpdates() {
+    // Arrêter l'interval existant s'il y en a un
+    this.stopStatusUpdates();
+
     // Mise à jour rapide pour réactivité en temps réel
     this.statusInterval = setInterval(() => {
       this.updateSensorValues();
     }, 1000); // 1 seconde pour meilleure réactivité
+
+    this.addLog("▶️ Démarrage des mises à jour de statut", "info");
+  }
+
+  stopStatusUpdates() {
+    if (this.statusInterval) {
+      clearInterval(this.statusInterval);
+      this.statusInterval = null;
+      this.addLog("⏹️ Arrêt des mises à jour de statut", "info");
+    }
   }
 
   async updateSensorValues() {
@@ -810,6 +823,9 @@ class IActionApp {
         // Mettre à jour l'interface pour chaque caméra
         this.setupCamerasGrid(result.results);
 
+        // Redémarrer les mises à jour de statut
+        this.startStatusUpdates();
+
         document.getElementById("start-multi-capture").disabled = true;
         document.getElementById("stop-multi-capture").disabled = false;
 
@@ -838,14 +854,15 @@ class IActionApp {
     try {
       this.addLog("⏹️ Arrêt de la capture multi-caméras...", "info");
 
-      const btn = document.getElementById('stop-multi-capture');
+      const btn = document.getElementById("stop-multi-capture");
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Arrêt...';
+      btn.innerHTML =
+        '<span class="spinner-border spinner-border-sm me-2"></span>Arrêt...';
 
-      const response = await fetch("/api/stop_capture", { 
+      const response = await fetch("/api/stop_capture", {
         method: "POST",
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}) // Arrêter toutes les caméras
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}), // Arrêter toutes les caméras
       });
 
       if (!response.ok) {
@@ -855,6 +872,9 @@ class IActionApp {
       const result = await response.json();
 
       if (result.success) {
+        // Arrêter les mises à jour de statut pour éviter le spam
+        this.stopStatusUpdates();
+
         // Réinitialiser l'interface
         this.resetCamerasGrid();
 
@@ -871,17 +891,19 @@ class IActionApp {
         `❌ Erreur lors de l'arrêt multi-caméras: ${error.message}`,
         "error"
       );
-      console.error('Erreur stopMultiCapture:', error);
+      console.error("Erreur stopMultiCapture:", error);
     } finally {
       // Restaurer le bouton même en cas d'erreur
-      const startBtn = document.getElementById('start-multi-capture');
-      const stopBtn = document.getElementById('stop-multi-capture');
-      
+      const startBtn = document.getElementById("start-multi-capture");
+      const stopBtn = document.getElementById("stop-multi-capture");
+
       startBtn.disabled = false;
-      startBtn.innerHTML = '<i class="bi bi-play-circle"></i> Démarrer Multi-Capture';
-      
+      startBtn.innerHTML =
+        '<i class="bi bi-play-circle"></i> Démarrer Multi-Capture';
+
       stopBtn.disabled = true;
-      stopBtn.innerHTML = '<i class="bi bi-stop-circle"></i> Arrêter Multi-Capture';
+      stopBtn.innerHTML =
+        '<i class="bi bi-stop-circle"></i> Arrêter Multi-Capture';
     }
   }
 
@@ -1041,11 +1063,14 @@ class IActionApp {
 
   resetCamerasGrid() {
     this.addLog("🔄 Réinitialisation de la grille des caméras...", "info");
-    
+
     // Supprimer toutes les caméras supplémentaires
     const grid = document.getElementById("cameras-grid");
     const existingCameras = grid.querySelectorAll("[data-camera-id]");
-    this.addLog(`🗑️ Suppression de ${existingCameras.length} caméra(s) supplémentaire(s)`, "info");
+    this.addLog(
+      `🗑️ Suppression de ${existingCameras.length} caméra(s) supplémentaire(s)`,
+      "info"
+    );
     existingCameras.forEach((cam) => cam.remove());
 
     // Réinitialiser la caméra principale
@@ -1057,10 +1082,10 @@ class IActionApp {
       mainStream.style.display = "none";
       mainStream.src = "";
     }
-    
+
     // Réinitialiser l'état interne
     this.activeCameras = {};
-    
+
     this.addLog("✅ Grille des caméras réinitialisée", "success");
   }
 

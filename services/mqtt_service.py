@@ -41,8 +41,17 @@ class MQTTService:
         self.password = os.getenv('MQTT_PASSWORD', '')
         self.topic_prefix = os.getenv('MQTT_TOPIC_PREFIX', 'iaction')
         
-        self.device_name = os.getenv('HA_DEVICE_NAME', 'IAction Camera AI')
-        self.device_id = os.getenv('HA_DEVICE_ID', 'iaction_camera_ai')
+        self.device_name = os.getenv('HA_DEVICE_NAME', 'IAction Multicam')
+        self.device_id = os.getenv('HA_DEVICE_ID', 'iaction_multicam')
+        
+        # Configuration du device pour Home Assistant
+        self.DEVICE_INFO = {
+            "identifiers": [self.device_id],
+            "name": self.device_name,
+            "manufacturer": "IAction",
+            "model": "Multi Camera AI",
+            "sw_version": "1.0"
+        }
         
         # Afficher les valeurs exactes lues du fichier .env
         print("=== Configuration MQTT chargée ===")
@@ -90,8 +99,17 @@ class MQTTService:
         self.username = os.getenv('MQTT_USERNAME', '')
         self.password = os.getenv('MQTT_PASSWORD', '')
         self.topic_prefix = os.getenv('MQTT_TOPIC_PREFIX', 'iaction')
-        self.device_name = os.getenv('HA_DEVICE_NAME', 'IAction Camera AI')
-        self.device_id = os.getenv('HA_DEVICE_ID', 'iaction_camera_ai')
+        self.device_name = os.getenv('HA_DEVICE_NAME', 'IAction Multicam')
+        self.device_id = os.getenv('HA_DEVICE_ID', 'iaction_multicam')
+
+        # Mettre à jour la configuration du device
+        self.DEVICE_INFO = {
+            "identifiers": [self.device_id],
+            "name": self.device_name,
+            "manufacturer": "IAction",
+            "model": "Multi Camera AI",
+            "sw_version": "1.0"
+        }
 
         # Afficher la configuration rechargée
         print("=== Configuration MQTT rechargée ===")
@@ -284,13 +302,7 @@ class MQTTService:
             "unique_id": f"{self.device_id}_{sensor_id}",
             "state_topic": state_topic,
             "icon": icon,
-            "device": {
-                "identifiers": [self.device_id],
-                "name": self.device_name,
-                "manufacturer": "IAction",
-                "model": "Camera AI Analyzer",
-                "sw_version": "1.0.0"
-            }
+            "device": self.DEVICE_INFO
         }
         
         if device_class:
@@ -323,13 +335,8 @@ class MQTTService:
             "device_class": device_class,
             "payload_on": "ON",
             "payload_off": "OFF",
-            "device": {
-                "identifiers": [self.device_id],
-                "name": self.device_name,
-                "manufacturer": "IAction",
-                "model": "Camera AI Analyzer",
-                "sw_version": "1.0.0"
-            }
+            "device": self.DEVICE_INFO
+        }
         }
         
         try:
