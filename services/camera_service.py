@@ -28,6 +28,9 @@ class CameraService:
             username_key = f'RTSP_USERNAME_{i+1}' if i > 0 else 'RTSP_USERNAME' 
             password_key = f'RTSP_PASSWORD_{i+1}' if i > 0 else 'RTSP_PASSWORD'
             name_key = f'RTSP_NAME_{i+1}' if i > 0 else 'RTSP_NAME'
+            width_key = f'RTSP_WIDTH_{i+1}' if i > 0 else 'RTSP_WIDTH'
+            height_key = f'RTSP_HEIGHT_{i+1}' if i > 0 else 'RTSP_HEIGHT'
+            fps_key = f'RTSP_FPS_{i+1}' if i > 0 else 'RTSP_FPS'
             
             url = os.getenv(url_key, '')
             if url:  # N'ajouter que si l'URL est définie
@@ -36,6 +39,9 @@ class CameraService:
                     'url': url,
                     'username': os.getenv(username_key, ''),
                     'password': os.getenv(password_key, ''),
+                    'width': int(os.getenv(width_key, '640')),  # Résolution réduite par défaut
+                    'height': int(os.getenv(height_key, '480')),
+                    'fps': int(os.getenv(fps_key, '15')),  # FPS réduit par défaut
                     'enabled': True
                 })
         
@@ -189,11 +195,32 @@ class CameraService:
                     # Configuration optimisée pour RTSP (FFMPEG)
                     cap = cv2.VideoCapture(actual_url, cv2.CAP_FFMPEG)
                     
-                    # Configuration RTSP spécifique pour latence minimale
+                    # Configuration RTSP spécifique pour latence minimale et performance
                     if cap.isOpened():
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Buffer minimal
-                        # Optimisations RTSP pour latence
+                        # Buffer minimal pour latence
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        
+                        # Optimisations de performance par caméra
+                        camera_info = self.get_camera_info(source) if isinstance(source, str) and source.startswith('rtsp_') else None
+                        if camera_info:
+                            # Appliquer résolution personnalisée si configurée
+                            if 'width' in camera_info and 'height' in camera_info:
+                                cap.set(cv2.CAP_PROP_FRAME_WIDTH, camera_info['width'])
+                                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_info['height'])
+                            # Appliquer FPS personnalisé
+                            if 'fps' in camera_info:
+                                cap.set(cv2.CAP_PROP_FPS, camera_info['fps'])
+                        else:
+                            # Valeurs par défaut pour caméras personnalisées (optimisées pour performance)
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                            cap.set(cv2.CAP_PROP_FPS, 15)
+                        
+                        # Optimisations RTSP supplémentaires
                         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M','J','P','G'))
+                        # Timeout pour éviter les blocages
+                        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 3000)
+                        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 3000)
                         
                         # Stocker les informations de la caméra
                         self.captures[camera_id] = {
@@ -312,10 +339,12 @@ class CameraService:
                         logger.warning(f"[{camera_id}] Aucune frame récente depuis {time.time() - camera_info['last_frame_ts']:.1f}s, tentative de reconnexion...")
                         return self._reconnect_camera(camera_id)
 
-                # Pour RTSP, flush le buffer pour obtenir la frame la plus récente
+                # Pour RTSP, lire la frame la plus récente (skip des frames en buffer)
                 ret = False
                 frame = None
-                for _ in range(3):
+                # Lire plusieurs frames pour vider le buffer et obtenir la plus récente
+                skip_frames = 2  # Réduire le nombre de frames à skip pour économiser CPU
+                for _ in range(skip_frames):
                     ret, frame = cap.read()
                     if not ret:
                         break
@@ -429,6 +458,9 @@ class CameraService:
             username_key = f'RTSP_USERNAME_{i+1}' if i > 0 else 'RTSP_USERNAME' 
             password_key = f'RTSP_PASSWORD_{i+1}' if i > 0 else 'RTSP_PASSWORD'
             name_key = f'RTSP_NAME_{i+1}' if i > 0 else 'RTSP_NAME'
+            width_key = f'RTSP_WIDTH_{i+1}' if i > 0 else 'RTSP_WIDTH'
+            height_key = f'RTSP_HEIGHT_{i+1}' if i > 0 else 'RTSP_HEIGHT'
+            fps_key = f'RTSP_FPS_{i+1}' if i > 0 else 'RTSP_FPS'
             
             url = os.getenv(url_key, '')
             if url:  # N'ajouter que si l'URL est définie
@@ -437,6 +469,9 @@ class CameraService:
                     'url': url,
                     'username': os.getenv(username_key, ''),
                     'password': os.getenv(password_key, ''),
+                    'width': int(os.getenv(width_key, '640')),
+                    'height': int(os.getenv(height_key, '480')),
+                    'fps': int(os.getenv(fps_key, '15')),
                     'enabled': True
                 })
         # Invalider le cache des caméras pour forcer le recalcul

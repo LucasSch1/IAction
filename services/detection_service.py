@@ -21,12 +21,37 @@ class DetectionService:
         self.binary_sensor_states = {}  # camera_id -> {detection_id: boolean}
         self.last_analysis_results = {}  # camera_id -> results
         
-        # Gestion de l'intervalle minimum entre analyses
-        self.last_analysis_time = 0
-        self.min_analysis_interval = float(os.getenv('MIN_ANALYSIS_INTERVAL', '0.1'))
+        # Gestion de l'intervalle minimum entre analyses (global et par caméra)
+        self.last_analysis_time = {}  # camera_id -> timestamp
+        self.min_analysis_interval = float(os.getenv('MIN_ANALYSIS_INTERVAL', '0.1'))  # Intervalle global par défaut
+        self.camera_analysis_intervals = {}  # camera_id -> interval personnalisé
+        
+        # Charger les intervalles personnalisés depuis l'environnement
+        self._load_camera_intervals()
         
         # Charger les détections sauvegardées
         self.load_detections()
+    
+    def _load_camera_intervals(self):
+        """Charge les intervalles d'analyse personnalisés par caméra"""
+        # Support pour 6 caméras avec intervalles personnalisés
+        for i in range(6):
+            interval_key = f'MIN_ANALYSIS_INTERVAL_{i+1}' if i > 0 else 'MIN_ANALYSIS_INTERVAL_1'
+            camera_key = f'CAMERA_ID_{i+1}' if i > 0 else 'CAMERA_ID_1'
+            
+            interval = os.getenv(interval_key)
+            camera_id = os.getenv(camera_key)
+            
+            if interval and camera_id:
+                try:
+                    self.camera_analysis_intervals[camera_id] = float(interval)
+                    logger.info(f"📊 Caméra {camera_id}: intervalle d'analyse = {interval}s")
+                except ValueError:
+                    logger.warning(f"⚠️ Intervalle invalide pour {camera_id}: {interval}")
+    
+    def get_camera_analysis_interval(self, camera_id: str) -> float:
+        """Récupère l'intervalle d'analyse pour une caméra spécifique"""
+        return self.camera_analysis_intervals.get(camera_id, self.min_analysis_interval)
     
     def add_detection(self, name: str, phrase: str, webhook_url: Optional[str] = None, enabled_cameras: Optional[List[str]] = None) -> str:
         """Ajoute une nouvelle détection personnalisée avec webhook optionnel"""
@@ -185,17 +210,23 @@ class DetectionService:
         """
         current_time = time.time()
         
-        # Vérifier l'intervalle minimum entre analyses
-        if current_time - self.last_analysis_time < self.min_analysis_interval:
+        # Récupérer l'intervalle personnalisé pour cette caméra
+        camera_interval = self.get_camera_analysis_interval(camera_id)
+        last_analysis_time = self.last_analysis_time.get(camera_id, 0)
+        
+        # Vérifier l'intervalle minimum entre analyses pour cette caméra spécifique
+        if current_time - last_analysis_time < camera_interval:
             # Retourner les derniers résultats si l'intervalle n'est pas respecté
-            if self.last_analysis_results:
-                return self.last_analysis_results
+            if camera_id in self.last_analysis_results:
+                return self.last_analysis_results[camera_id]
             else:
                 return {
                     'detections': [],
                     'success': True,
                     'timestamp': current_time,
-                    'skipped': True  # Indicateur que l'analyse a été ignorée
+                    'skipped': True,  # Indicateur que l'analyse a été ignorée
+                    'camera_id': camera_id,
+                    'next_analysis_in': camera_interval - (current_time - last_analysis_time)
                 }
         
         results = {
@@ -293,11 +324,11 @@ class DetectionService:
                 results['success'] = False
                 results['error'] = combined_results.get('error', 'Erreur inconnue dans l\'analyse combinée')
             
-            # Sauvegarder les résultats pour référence
-            self.last_analysis_results = results.copy()
+            # Sauvegarder les résultats pour référence (par caméra)
+            self.last_analysis_results[camera_id] = results.copy()
             
-            # Mettre à jour le timestamp de la dernière analyse
-            self.last_analysis_time = current_time
+            # Mettre à jour le timestamp de la dernière analyse pour cette caméra
+            self.last_analysis_time[camera_id] = current_time
             
             # Envoyer tous les messages MQTT en une seule fois
             self.mqtt_service.flush_message_buffer()
