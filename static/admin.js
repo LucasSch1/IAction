@@ -176,7 +176,11 @@ class AdminApp {
 
     // Bouton réinitialiser caméras
     document.getElementById("clear-cameras").addEventListener("click", () => {
-      if (confirm("Êtes-vous sûr de vouloir supprimer toutes les caméras configurées ?")) {
+      if (
+        confirm(
+          "Êtes-vous sûr de vouloir supprimer toutes les caméras configurées ?"
+        )
+      ) {
         this.clearExistingCameras();
         this.clearCamerasStorage();
       }
@@ -868,7 +872,7 @@ class AdminApp {
     if (cameraDiv) {
       cameraDiv.remove();
       this.addLog(`Caméra "${cameraId}" supprimée`, "info");
-      
+
       // Mettre à jour le localStorage après suppression
       this.saveCamerasConfiguration();
     }
@@ -891,7 +895,7 @@ class AdminApp {
     // Cette méthode sera appelée pour charger les caméras existantes depuis le backend
     // D'abord, nettoyer les caméras existantes pour éviter les doublons
     this.clearExistingCameras();
-    
+
     // Pour l'instant, nous utilisons localStorage comme exemple
     const savedCameras = localStorage.getItem("additional_cameras");
     if (savedCameras) {
@@ -912,12 +916,12 @@ class AdminApp {
     // Supprimer tous les champs de caméras existants
     const camerasContainer = document.getElementById("cameras-container");
     if (camerasContainer) {
-      camerasContainer.innerHTML = '';
+      camerasContainer.innerHTML = "";
     }
     // Aussi nettoyer le conteneur additional-cameras s'il existe
     const additionalContainer = document.getElementById("additional-cameras");
     if (additionalContainer) {
-      additionalContainer.innerHTML = '';
+      additionalContainer.innerHTML = "";
     }
   }
 
