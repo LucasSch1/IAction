@@ -451,8 +451,23 @@ def start_capture():
         # ===== MODE RTSP =========
         # =========================
         if source_type == 'rtsp':
-            if rtsp_url:
-                is_valid, message = camera_service.validate_rtsp_url(rtsp_url)
+            # Déterminer l'URL RTSP à utiliser
+            actual_rtsp_url = rtsp_url
+            if not actual_rtsp_url:
+                # Essayer l'URL par défaut depuis l'environnement
+                actual_rtsp_url = os.getenv('DEFAULT_RTSP_URL', '')
+                if not actual_rtsp_url:
+                    # Si camera_id commence par "rtsp_", c'est peut-être une caméra préconfigurée
+                    if camera_id.startswith('rtsp_'):
+                        actual_rtsp_url = camera_id  # Le camera_service gérera cela
+                    else:
+                        return jsonify({
+                            'success': False,
+                            'error': 'URL RTSP requise (rtsp_url) ou DEFAULT_RTSP_URL dans .env'
+                        }), 400
+            
+            if actual_rtsp_url and not camera_id.startswith('rtsp_'):
+                is_valid, message = camera_service.validate_rtsp_url(actual_rtsp_url)
                 if not is_valid:
                     return jsonify({
                         'success': False,
@@ -461,7 +476,7 @@ def start_capture():
 
             ctx.ai_consecutive_failures = 0
 
-            success = camera_service.start_capture(camera_id, 'rtsp', rtsp_url)
+            success = camera_service.start_capture(camera_id, actual_rtsp_url, 'rtsp')
             if not success:
                 return jsonify({
                     'success': False,
