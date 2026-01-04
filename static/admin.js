@@ -173,6 +173,14 @@ class AdminApp {
     document.getElementById("add-camera").addEventListener("click", () => {
       this.addCameraConfig();
     });
+
+    // Bouton réinitialiser caméras
+    document.getElementById("clear-cameras").addEventListener("click", () => {
+      if (confirm("Êtes-vous sûr de vouloir supprimer toutes les caméras configurées ?")) {
+        this.clearExistingCameras();
+        this.clearCamerasStorage();
+      }
+    });
   }
 
   setupFormValidation() {
@@ -771,6 +779,12 @@ class AdminApp {
     const cameraCount = container.children.length;
     const cameraId = `camera_${cameraCount + 1}`;
 
+    // Vérifier si la caméra existe déjà pour éviter les doublons
+    if (document.querySelector(`[data-camera-id="${cameraId}"]`)) {
+      console.warn(`Caméra ${cameraId} existe déjà, évitement du doublon`);
+      return;
+    }
+
     const cameraDiv = document.createElement("div");
     cameraDiv.className = "card mb-3";
     cameraDiv.setAttribute("data-camera-id", cameraId);
@@ -854,6 +868,9 @@ class AdminApp {
     if (cameraDiv) {
       cameraDiv.remove();
       this.addLog(`Caméra "${cameraId}" supprimée`, "info");
+      
+      // Mettre à jour le localStorage après suppression
+      this.saveCamerasConfiguration();
     }
   }
 
@@ -897,6 +914,17 @@ class AdminApp {
     if (camerasContainer) {
       camerasContainer.innerHTML = '';
     }
+    // Aussi nettoyer le conteneur additional-cameras s'il existe
+    const additionalContainer = document.getElementById("additional-cameras");
+    if (additionalContainer) {
+      additionalContainer.innerHTML = '';
+    }
+  }
+
+  // Méthode utilitaire pour nettoyer complètement le localStorage des caméras
+  clearCamerasStorage() {
+    localStorage.removeItem("additional_cameras");
+    this.addLog("Configuration des caméras réinitialisée", "info");
   }
 
   populateCameraFields(camera) {
