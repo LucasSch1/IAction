@@ -17,9 +17,9 @@ class DetectionService:
         self.lock = threading.Lock()
         self.detections_file = 'detections.json'
         
-        # États des binary sensors pour éviter les publications répétées
-        self.binary_sensor_states = {}
-        self.last_analysis_results = {}
+        # États des binary sensors pour éviter les publications répétées (par caméra)
+        self.binary_sensor_states = {}  # camera_id -> {detection_id: boolean}
+        self.last_analysis_results = {}  # camera_id -> results
         
         # Gestion de l'intervalle minimum entre analyses
         self.last_analysis_time = 0
@@ -43,16 +43,19 @@ class DetectionService:
                 'trigger_count': 0
             }
             
-            # Configurer le binary sensor MQTT
-            sensor_id = f"detection_{detection_id.replace('-', '_')}"
-            self.mqtt_service.setup_binary_sensor(
-                sensor_id=sensor_id,
-                name=f"Détection: {name}",
-                device_class="motion"
-            )
-            
-            # Initialiser l'état du binary sensor
-            self.binary_sensor_states[detection_id] = False
+            # Configurer les binary sensors MQTT pour chaque caméra existante
+            for camera_id in self.binary_sensor_states.keys():
+                sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                sensor_name = f"Détection {name} ({camera_id})"
+                self.mqtt_service.setup_binary_sensor(
+                    sensor_id=sensor_id,
+                    name=sensor_name,
+                    device_class="motion"
+                )
+                
+            # Initialiser l'état pour toutes les caméras existantes
+            for camera_id in self.binary_sensor_states.keys():
+                self.binary_sensor_states[camera_id][detection_id] = False
             self.mqtt_service.buffer_binary_sensor_state(sensor_id, False)
             self.mqtt_service.flush_message_buffer()
             
@@ -73,8 +76,10 @@ class DetectionService:
             
             # Supprimer de nos structures
             del self.detections[detection_id]
-            if detection_id in self.binary_sensor_states:
-                del self.binary_sensor_states[detection_id]
+            # Supprimer des états par caméra
+            for camera_id in self.binary_sensor_states:
+                if detection_id in self.binary_sensor_states[camera_id]:
+                    del self.binary_sensor_states[camera_id][detection_id]
             if detection_id in self.last_analysis_results:
                 del self.last_analysis_results[detection_id]
             
@@ -147,6 +152,10 @@ class DetectionService:
         }
         
         try:
+            # Initialiser les états pour cette caméra si nécessaire
+            if camera_id not in self.binary_sensor_states:
+                self.binary_sensor_states[camera_id] = {}
+            
             # Récupérer la liste des détections personnalisées
             with self.lock:
                 detections_list = [{
@@ -154,6 +163,13 @@ class DetectionService:
                     'phrase': detection['phrase'],
                     'name': detection['name']
                 } for detection_id, detection in self.detections.items()]
+            
+            if not detections_list:
+                return {
+                    'success': True,
+                    'analysis_count': 0,
+                    'detections': []
+                }
             
             # Utiliser la méthode d'analyse combinée pour tout analyser en un seul appel
             combined_results = self.ai_service.analyze_combined(image_base64, detections_list)
@@ -166,13 +182,20 @@ class DetectionService:
                         detection_id = detection_result['id']
                         is_match = detection_result['match']
                         
-                        # Mettre à jour l'état du binary sensor si nécessaire
+                        # Mettre à jour l'état du binary sensor si nécessaire (par caméra)
                         if detection_id in self.detections:
                             sensor_id = f"detection_{detection_id.replace('-', '_')}"
-                            # Ne publier que si l'état a changé
-                            if detection_id not in self.binary_sensor_states or self.binary_sensor_states[detection_id] != is_match:
-                                self.binary_sensor_states[detection_id] = is_match
-                                self.mqtt_service.buffer_binary_sensor_state(sensor_id, is_match)
+                            
+                            # Vérifier si l'état a changé pour cette caméra spécifique
+                            camera_states = self.binary_sensor_states[camera_id]
+                            previous_state = camera_states.get(detection_id, False)
+                            
+                            if previous_state != is_match:
+                                camera_states[detection_id] = is_match
+                                
+                                # Pour MQTT, utiliser un sensor ID spécifique par caméra
+                                camera_sensor_id = f"{sensor_id}_{camera_id.replace('-', '_')}"
+                                self.mqtt_service.buffer_binary_sensor_state(camera_sensor_id, is_match)
                             
                             # Mettre à jour les statistiques de la détection et déclencher webhook si configuré
                             if is_match:
@@ -229,34 +252,88 @@ class DetectionService:
             results['error'] = str(e)
             return results
     
+    def register_camera(self, camera_id: str):
+        """Enregistre une nouvelle caméra et crée les sensors MQTT associés"""
+        if camera_id not in self.binary_sensor_states:
+            self.binary_sensor_states[camera_id] = {}
+            
+            # Créer les sensors MQTT pour toutes les détections existantes
+            with self.lock:
+                for detection_id, detection in self.detections.items():
+                    sensor_id = f"detection_{detection_id.replace('-', '_')}_{camera_id.replace('-', '_')}"
+                    sensor_name = f"Détection {detection['name']} ({camera_id})"
+                    self.mqtt_service.setup_binary_sensor(
+                        sensor_id=sensor_id,
+                        name=sensor_name,
+                        device_class="motion"
+                    )
+                    # Initialiser l'état à False
+                    self.binary_sensor_states[camera_id][detection_id] = False
+    
     # Les méthodes _analyze_fixed_sensors et _analyze_custom_detections ont été supprimées
     # car elles sont remplacées par l'utilisation de la méthode analyze_combined du service AI
     
-    def get_detection_status(self, detection_id: str) -> Dict[str, Any]:
+    def get_detection_status(self, detection_id: str, camera_id: str = None) -> Dict[str, Any]:
         """Récupère le statut d'une détection"""
         with self.lock:
             if detection_id not in self.detections:
                 return None
             
             detection = self.detections[detection_id].copy()
-            detection['current_state'] = self.binary_sensor_states.get(detection_id, False)
+            
+            if camera_id is not None:
+                # Statut pour une caméra spécifique
+                detection['current_state'] = self.binary_sensor_states.get(camera_id, {}).get(detection_id, False)
+                detection['camera_id'] = camera_id
+            else:
+                # Statut global - True si la détection est active sur au moins une caméra
+                detection['current_state'] = any(
+                    cam_states.get(detection_id, False) 
+                    for cam_states in self.binary_sensor_states.values()
+                )
+                detection['active_cameras'] = [
+                    cam_id for cam_id, cam_states in self.binary_sensor_states.items()
+                    if cam_states.get(detection_id, False)
+                ]
+            
             detection['last_analysis'] = self.last_analysis_results.get(detection_id)
             
             return detection
     
-    def get_all_status(self) -> Dict[str, Any]:
+    def get_all_status(self, camera_id: str = None) -> Dict[str, Any]:
         """Récupère le statut de toutes les détections"""
         with self.lock:
-            status = {
-                'total_detections': len(self.detections),
-                'active_detections': sum(1 for state in self.binary_sensor_states.values() if state),
-                'detections': []
-            }
-            
-            for detection_id in self.detections:
-                detection_status = self.get_detection_status(detection_id)
-                if detection_status:
-                    status['detections'].append(detection_status)
+            if camera_id is not None:
+                # Statut pour une caméra spécifique
+                status = {
+                    'camera_id': camera_id,
+                    'total_detections': len(self.detections),
+                    'active_detections': sum(
+                        1 for detection_id in self.detections 
+                        if self.binary_sensor_states.get(camera_id, {}).get(detection_id, False)
+                    ),
+                    'detections': []
+                }
+                
+                for detection_id in self.detections:
+                    detection_status = self.get_detection_status(detection_id, camera_id)
+                    if detection_status:
+                        status['detections'].append(detection_status)
+            else:
+                # Statut global
+                status = {
+                    'total_detections': len(self.detections),
+                    'active_detections': sum(
+                        1 for detection_id in self.detections 
+                        if any(cam_states.get(detection_id, False) for cam_states in self.binary_sensor_states.values())
+                    ),
+                    'detections': []
+                }
+                
+                for detection_id in self.detections:
+                    detection_status = self.get_detection_status(detection_id)
+                    if detection_status:
+                        status['detections'].append(detection_status)
             
             return status
     

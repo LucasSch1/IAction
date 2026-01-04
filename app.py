@@ -438,6 +438,8 @@ def start_capture():
         # Créer le contexte caméra si inexistant
         if camera_id not in camera_contexts:
             camera_contexts[camera_id] = CameraContext(camera_id)
+            # Enregistrer la caméra avec le service de détection
+            detection_service.register_camera(camera_id)
 
         ctx = camera_contexts[camera_id]
 
@@ -1369,6 +1371,8 @@ def start_multiple_cameras():
                 # Créer le contexte caméra si inexistant
                 if camera_id not in camera_contexts:
                     camera_contexts[camera_id] = CameraContext(camera_id)
+                    # Enregistrer la caméra avec le service de détection
+                    detection_service.register_camera(camera_id)
                 
                 ctx = camera_contexts[camera_id]
                 
