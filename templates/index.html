@@ -104,46 +104,76 @@
                 </div>
             </div>
 
-            <!-- Flux vidéo -->
+            <!-- Flux vidéo multi-caméras -->
             <div class="col-md-8">
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="bi bi-camera"></i> Flux Vidéo en Direct</h5>
-                        <button id="toggle-video-stream" class="btn btn-outline-primary btn-sm" style="display: none;">
-                            <i class="bi bi-eye"></i> <span id="toggle-video-text">Voir le flux live</span>
-                        </button>
+                        <h5><i class="bi bi-cameras"></i> Flux Vidéo Multi-Caméras</h5>
+                        <div class="btn-group" role="group">
+                            <button id="start-multi-capture" class="btn btn-success btn-sm">
+                                <i class="bi bi-play-circle"></i> Démarrer Multi-Capture
+                            </button>
+                            <button id="stop-multi-capture" class="btn btn-danger btn-sm" disabled>
+                                <i class="bi bi-stop-circle"></i> Arrêter Multi-Capture
+                            </button>
+                        </div>
                     </div>
-                    <div class="card-body text-center">
-                        <div id="video-container">
-                            <img id="video-stream" src="" alt="Flux vidéo" class="img-fluid rounded" style="display: none; max-height: 500px;">
-                            
-                            <!-- État par défaut : Pas de capture -->
-                            <div id="no-capture" class="py-5">
-                                <div class="mb-4">
-                                    <i class="bi bi-play-circle text-primary" style="font-size: 5rem;"></i>
-                                </div>
-                                <h5 class="text-muted mb-3">Prêt à démarrer</h5>
-                                <p class="text-muted mb-4">Démarrez une capture RTSP pour voir le flux vidéo en direct</p>
-                                <div class="d-flex justify-content-center gap-2">
-                                    <span class="badge bg-light text-dark"><i class="bi bi-camera"></i> RTSP</span>
-                                    <span class="badge bg-light text-dark"><i class="bi bi-robot"></i> IA</span>
-                                    <span class="badge bg-light text-dark"><i class="bi bi-graph-up"></i> Métriques</span>
+                    <div class="card-body">
+                        <!-- Grille des flux vidéo -->
+                        <div id="cameras-grid" class="row g-3">
+                            <!-- Flux caméra principale (par défaut) -->
+                            <div class="col-md-6" id="main-camera-container">
+                                <div class="card">
+                                    <div class="card-header d-flex justify-content-between align-items-center">
+                                        <small class="text-muted">
+                                            <i class="bi bi-camera"></i> Caméra Principale
+                                        </small>
+                                        <div>
+                                            <span class="badge bg-secondary" id="main-camera-status">Arrêtée</span>
+                                            <button class="btn btn-outline-primary btn-sm ms-1" id="toggle-main-stream" style="display: none;">
+                                                <i class="bi bi-eye"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div class="card-body p-2 text-center">
+                                        <div id="main-video-container">
+                                            <img id="main-video-stream" src="" alt="Flux principal" class="img-fluid rounded" style="display: none; max-height: 250px;">
+                                            
+                                            <!-- État par défaut -->
+                                            <div id="main-no-capture" class="py-4">
+                                                <div class="mb-3">
+                                                    <i class="bi bi-play-circle text-primary" style="font-size: 3rem;"></i>
+                                                </div>
+                                                <h6 class="text-muted">Prêt à démarrer</h6>
+                                                <small class="text-muted">Caméra principale RTSP</small>
+                                            </div>
+                                            
+                                            <!-- État : Capture active mais flux masqué -->
+                                            <div id="main-capture-ready" class="py-4" style="display: none;">
+                                                <div class="mb-3">
+                                                    <i class="bi bi-eye text-success" style="font-size: 3rem;"></i>
+                                                </div>
+                                                <h6 class="text-success">Capture en cours</h6>
+                                                <small class="text-muted">Cliquez sur l'œil pour voir le flux</small>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                             
-                            <!-- État : Capture active mais flux masqué -->
-                            <div id="capture-ready" class="py-5" style="display: none;">
-                                <div class="mb-4">
-                                    <i class="bi bi-eye text-success" style="font-size: 5rem;"></i>
-                                </div>
-                                <h5 class="text-success mb-3">Capture en cours</h5>
-                                <p class="text-muted mb-4">Cliquez sur "Voir le flux live" pour afficher la vidéo</p>
-                                <div class="d-flex justify-content-center gap-2">
-                                    <span class="badge bg-success"><i class="bi bi-record-circle"></i> Actif</span>
-                                    <span class="badge bg-info"><i class="bi bi-cpu"></i> Analyse IA</span>
-                                    <span class="badge bg-warning"><i class="bi bi-broadcast"></i> MQTT</span>
-                                </div>
+                            <!-- Les caméras supplémentaires seront ajoutées ici dynamiquement -->
+                        </div>
+                        
+                        <!-- État global : Aucune caméra configurée -->
+                        <div id="no-cameras-configured" class="text-center py-5" style="display: none;">
+                            <div class="mb-4">
+                                <i class="bi bi-camera-video-off text-muted" style="font-size: 4rem;"></i>
                             </div>
+                            <h5 class="text-muted mb-3">Aucune caméra supplémentaire configurée</h5>
+                            <p class="text-muted mb-4">Configurez des caméras supplémentaires dans l'administration pour les voir ici</p>
+                            <a href="/admin" class="btn btn-outline-primary">
+                                <i class="bi bi-gear"></i> Aller à l'Administration
+                            </a>
                         </div>
                     </div>
                 </div>

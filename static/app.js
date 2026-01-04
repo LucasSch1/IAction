@@ -27,9 +27,13 @@ class IActionApp {
 
 
     setupEventListeners() {
-        // Contrôles de capture
+        // Contrôles de capture unique
         document.getElementById('start-capture').addEventListener('click', () => this.startCapture());
         document.getElementById('stop-capture').addEventListener('click', () => this.stopCapture());
+        
+        // Contrôles multi-caméras
+        document.getElementById('start-multi-capture').addEventListener('click', () => this.startMultiCapture());
+        document.getElementById('stop-multi-capture').addEventListener('click', () => this.stopMultiCapture());
         
         // Détections
         document.getElementById('add-detection').addEventListener('click', () => this.showAddDetectionModal());
@@ -37,8 +41,11 @@ class IActionApp {
         
         // Journaux UI supprimés: aucun binding nécessaire
         
-        // Flux vidéo
-        document.getElementById('toggle-video-stream').addEventListener('click', () => this.toggleVideoStream());
+        // Flux vidéo principal
+        const toggleMainStream = document.getElementById('toggle-main-stream');
+        if (toggleMainStream) {
+            toggleMainStream.addEventListener('click', () => this.toggleMainVideoStream());
+        }
         
         // Modal
         this.addDetectionModal = new bootstrap.Modal(document.getElementById('addDetectionModal'));
@@ -49,6 +56,10 @@ class IActionApp {
         // Suivi du flux vidéo
         this.isVideoStreamVisible = false;
         this.captureInProgress = false;
+        
+        // État des caméras multiples
+        this.activeCameras = {};
+        this.camerasConfig = [];
     }
     
     async loadDetections() {
@@ -672,6 +683,284 @@ class IActionApp {
             this.isVideoStreamVisible = true;
             
             console.log('Flux vidéo affiché');
+        }
+    }
+    
+    // === MÉTHODES MULTI-CAMÉRAS ===
+    
+    async startMultiCapture() {
+        try {
+            this.addLog('🎬 Démarrage de la capture multi-caméras...', 'info');
+            
+            // Charger la configuration des caméras depuis l'admin
+            await this.loadCamerasConfiguration();
+            
+            const btn = document.getElementById('start-multi-capture');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Démarrage...';
+            
+            let allCameras = [];
+            
+            // Ajouter la caméra principale
+            allCameras.push({
+                id: 'main',
+                name: 'Caméra Principale',
+                mode: 'rtsp'
+                // L'URL RTSP sera prise depuis DEFAULT_RTSP_URL
+            });
+            
+            // Ajouter les caméras configurées
+            allCameras = allCameras.concat(this.camerasConfig);
+            
+            if (allCameras.length === 1) {
+                this.addLog('ℹ️ Seule la caméra principale sera démarrée. Configurez des caméras supplémentaires dans l\'administration.', 'info');
+            }
+            
+            // Démarrer toutes les caméras
+            const response = await fetch('/api/admin/cameras/start_multiple', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ cameras: allCameras })
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                // Mettre à jour l'interface pour chaque caméra
+                this.setupCamerasGrid(result.results);
+                
+                document.getElementById('start-multi-capture').disabled = true;
+                document.getElementById('stop-multi-capture').disabled = false;
+                
+                const successCount = result.results.filter(r => r.success).length;
+                this.addLog(`✅ ${successCount}/${result.results.length} caméra(s) démarrée(s)`, 'success');
+            } else {
+                this.addLog(`❌ Erreur: ${result.error}`, 'error');
+            }
+            
+        } catch (error) {
+            this.addLog(`❌ Erreur lors du démarrage multi-caméras: ${error.message}`, 'error');
+        } finally {
+            const btn = document.getElementById('start-multi-capture');
+            btn.disabled = false;
+            btn.innerHTML = '<i class="bi bi-play-circle"></i> Démarrer Multi-Capture';
+        }
+    }
+    
+    async stopMultiCapture() {
+        try {
+            this.addLog('⏹️ Arrêt de la capture multi-caméras...', 'info');
+            
+            const response = await fetch('/api/stop_capture', { method: 'POST' });
+            const result = await response.json();
+            
+            if (result.success) {
+                // Réinitialiser l'interface
+                this.resetCamerasGrid();
+                
+                document.getElementById('start-multi-capture').disabled = false;
+                document.getElementById('stop-multi-capture').disabled = true;
+                
+                this.addLog('✅ Capture multi-caméras arrêtée', 'success');
+            } else {
+                this.addLog(`❌ Erreur lors de l'arrêt: ${result.error}`, 'error');
+            }
+            
+        } catch (error) {
+            this.addLog(`❌ Erreur lors de l'arrêt multi-caméras: ${error.message}`, 'error');
+        }
+    }
+    
+    async loadCamerasConfiguration() {
+        try {
+            // Charger depuis le localStorage (temporaire) ou API
+            const savedCameras = localStorage.getItem('additional_cameras');
+            
+            if (savedCameras) {
+                const cameras = JSON.parse(savedCameras);
+                this.camerasConfig = cameras.map(camera => {
+                    const cameraId = camera[`${camera.id}_id`] || camera.id;
+                    const mode = camera[`${camera.id}_mode`] || 'rtsp';
+                    const name = camera[`${camera.id}_name`] || `Caméra ${cameraId}`;
+                    
+                    let config = {
+                        id: cameraId,
+                        name: name,
+                        mode: mode
+                    };
+                    
+                    if (mode === 'rtsp') {
+                        config.rtsp_url = camera[`${camera.id}_rtsp_url`];
+                        config.rtsp_username = camera[`${camera.id}_rtsp_username`];
+                        config.rtsp_password = camera[`${camera.id}_rtsp_password`];
+                    } else if (mode === 'ha_polling') {
+                        config.ha_entity = camera[`${camera.id}_ha_entity`];
+                        config.ha_attr = camera[`${camera.id}_ha_attr`];
+                        config.ha_interval = camera[`${camera.id}_ha_interval`];
+                    }
+                    
+                    return config;
+                });
+            } else {
+                this.camerasConfig = [];
+            }
+            
+            this.addLog(`Configuration chargée: ${this.camerasConfig.length} caméra(s) configurée(s)`, 'info');
+            
+        } catch (error) {
+            this.addLog(`❌ Erreur chargement configuration: ${error.message}`, 'error');
+            this.camerasConfig = [];
+        }
+    }
+    
+    setupCamerasGrid(results) {
+        const grid = document.getElementById('cameras-grid');
+        const mainContainer = document.getElementById('main-camera-container');
+        
+        // Nettoyer les caméras supplémentaires existantes
+        const existingCameras = grid.querySelectorAll('[data-camera-id]');
+        existingCameras.forEach(cam => cam.remove());
+        
+        // Ajouter chaque caméra à la grille
+        results.forEach(result => {
+            if (result.camera_id === 'main') {
+                // Caméra principale
+                this.updateMainCameraStatus(result.success, result.message);
+                return;
+            }
+            
+            this.addCameraToGrid(result);
+        });
+    }
+    
+    addCameraToGrid(cameraResult) {
+        const grid = document.getElementById('cameras-grid');
+        const cameraDiv = document.createElement('div');
+        cameraDiv.className = 'col-md-6';
+        cameraDiv.setAttribute('data-camera-id', cameraResult.camera_id);
+        
+        const statusBadge = cameraResult.success ? 
+            '<span class="badge bg-success">Active</span>' : 
+            '<span class="badge bg-danger">Erreur</span>';
+            
+        cameraDiv.innerHTML = `
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <small class="text-muted">
+                        <i class="bi bi-camera-video"></i> ${cameraResult.camera_name || cameraResult.camera_id}
+                    </small>
+                    <div>
+                        ${statusBadge}
+                        <button class="btn btn-outline-primary btn-sm ms-1" onclick="app.toggleCameraStream('${cameraResult.camera_id}')" ${!cameraResult.success ? 'disabled' : ''}>
+                            <i class="bi bi-eye"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body p-2 text-center">
+                    <div class="camera-video-container">
+                        <img class="camera-stream img-fluid rounded" style="display: none; max-height: 250px;" alt="Flux ${cameraResult.camera_id}">
+                        
+                        <div class="camera-placeholder py-4">
+                            <div class="mb-3">
+                                <i class="bi bi-${cameraResult.success ? 'eye text-success' : 'exclamation-triangle text-danger'}" style="font-size: 3rem;"></i>
+                            </div>
+                            <h6 class="${cameraResult.success ? 'text-success' : 'text-danger'}">${cameraResult.message}</h6>
+                            ${cameraResult.success ? '<small class="text-muted">Cliquez sur l\'œil pour voir le flux</small>' : ''}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        grid.appendChild(cameraDiv);
+    }
+    
+    updateMainCameraStatus(isActive, message = null) {
+        const statusBadge = document.getElementById('main-camera-status');
+        const toggleBtn = document.getElementById('toggle-main-stream');
+        const noCapture = document.getElementById('main-no-capture');
+        const captureReady = document.getElementById('main-capture-ready');
+        
+        if (isActive) {
+            statusBadge.textContent = 'Active';
+            statusBadge.className = 'badge bg-success';
+            toggleBtn.style.display = '';
+            noCapture.style.display = 'none';
+            captureReady.style.display = 'block';
+            
+            if (message) {
+                // Optionnel: afficher le message de succès
+                const readyText = captureReady.querySelector('h6');
+                if (readyText) readyText.textContent = message;
+            }
+        } else {
+            statusBadge.textContent = message || 'Arrêtée';
+            statusBadge.className = 'badge bg-secondary';
+            toggleBtn.style.display = 'none';
+            noCapture.style.display = 'block';
+            captureReady.style.display = 'none';
+        }
+    }
+    
+    resetCamerasGrid() {
+        // Supprimer toutes les caméras supplémentaires
+        const grid = document.getElementById('cameras-grid');
+        const existingCameras = grid.querySelectorAll('[data-camera-id]');
+        existingCameras.forEach(cam => cam.remove());
+        
+        // Réinitialiser la caméra principale
+        this.updateMainCameraStatus(false);
+        
+        // Masquer les flux
+        const mainStream = document.getElementById('main-video-stream');
+        if (mainStream) {
+            mainStream.style.display = 'none';
+            mainStream.src = '';
+        }
+    }
+    
+    toggleMainVideoStream() {
+        const videoStream = document.getElementById('main-video-stream');
+        const captureReady = document.getElementById('main-capture-ready');
+        const toggleBtn = document.getElementById('toggle-main-stream');
+        const icon = toggleBtn.querySelector('i');
+        
+        if (videoStream.style.display === 'none') {
+            // Afficher le flux principal
+            videoStream.src = '/video_feed/main?' + new Date().getTime();
+            videoStream.style.display = 'block';
+            captureReady.style.display = 'none';
+            icon.className = 'bi bi-eye-slash';
+        } else {
+            // Masquer le flux principal
+            videoStream.style.display = 'none';
+            videoStream.src = '';
+            captureReady.style.display = 'block';
+            icon.className = 'bi bi-eye';
+        }
+    }
+    
+    toggleCameraStream(cameraId) {
+        const cameraContainer = document.querySelector(`[data-camera-id="${cameraId}"]`);
+        if (!cameraContainer) return;
+        
+        const videoStream = cameraContainer.querySelector('.camera-stream');
+        const placeholder = cameraContainer.querySelector('.camera-placeholder');
+        const toggleBtn = cameraContainer.querySelector('button');
+        const icon = toggleBtn.querySelector('i');
+        
+        if (videoStream.style.display === 'none') {
+            // Afficher le flux
+            videoStream.src = `/video_feed/${cameraId}?` + new Date().getTime();
+            videoStream.style.display = 'block';
+            placeholder.style.display = 'none';
+            icon.className = 'bi bi-eye-slash';
+        } else {
+            // Masquer le flux
+            videoStream.style.display = 'none';
+            videoStream.src = '';
+            placeholder.style.display = 'block';
+            icon.className = 'bi bi-eye';
         }
     }
     
