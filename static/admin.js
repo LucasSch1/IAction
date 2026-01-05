@@ -308,9 +308,6 @@ class AdminApp {
       // Charger les caméras supplémentaires
       this.loadCamerasConfiguration();
 
-      // Charger les intervalles d'analyse des caméras
-      this.loadCameraIntervals();
-
       this.addLog("✅ Configuration chargée avec succès", "success");
     } catch (error) {
       this.addLog(`❌ Erreur lors du chargement: ${error.message}`, "error");
@@ -844,6 +841,26 @@ class AdminApp {
                             <input type="password" class="form-control" name="${cameraId}_rtsp_password">
                         </div>
                     </div>
+                    <div class="row mt-2">
+                        <div class="col-md-6">
+                            <label class="form-label">Intervalle d'analyse (secondes)</label>
+                            <div class="input-group">
+                                <input type="number" class="form-control" name="${cameraId}_analysis_interval" 
+                                       value="2.0" min="0.1" max="60" step="0.1" placeholder="2.0">
+                                <span class="input-group-text">s</span>
+                            </div>
+                            <div class="form-text">Temps minimum entre deux analyses IA (0.1-60s)</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Actions</label>
+                            <div>
+                                <button type="button" class="btn btn-outline-success btn-sm" 
+                                        onclick="adminApp.applyCameraInterval('${cameraId}')">
+                                    <i class="bi bi-check-circle"></i> Appliquer intervalle
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- Configuration HA Polling -->
@@ -860,6 +877,26 @@ class AdminApp {
                         <div class="col-md-4">
                             <label class="form-label">Intervalle (s)</label>
                             <input type="number" class="form-control" name="${cameraId}_ha_interval" value="1.0" min="0.5" step="0.5">
+                        </div>
+                    </div>
+                    <div class="row mt-2">
+                        <div class="col-md-6">
+                            <label class="form-label">Intervalle d'analyse (secondes)</label>
+                            <div class="input-group">
+                                <input type="number" class="form-control" name="${cameraId}_analysis_interval" 
+                                       value="2.0" min="0.1" max="60" step="0.1" placeholder="2.0">
+                                <span class="input-group-text">s</span>
+                            </div>
+                            <div class="form-text">Temps minimum entre deux analyses IA (0.1-60s)</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Actions</label>
+                            <div>
+                                <button type="button" class="btn btn-outline-success btn-sm" 
+                                        onclick="adminApp.applyCameraInterval('${cameraId}')">
+                                    <i class="bi bi-check-circle"></i> Appliquer intervalle
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -971,79 +1008,9 @@ class AdminApp {
     return cameras;
   }
 
-  // Gestion des intervalles d'analyse par caméra
-  loadCameraIntervals() {
-    this.addLog("Chargement des intervalles d'analyse des caméras...", "info");
-    
-    fetch('/api/cameras')
-      .then(response => response.json())
-      .then(data => {
-        const container = document.getElementById('camera-intervals-container');
-        if (!container) return;
-
-        container.innerHTML = '';
-        
-        // Charger les caméras configurées depuis le backend
-        if (data.cameras && data.cameras.length > 0) {
-          data.cameras.forEach((camera, index) => {
-            this.addCameraIntervalConfig(camera, index);
-          });
-        }
-      })
-      .catch(error => {
-        this.addLog(`Erreur lors du chargement des intervalles: ${error.message}`, "error");
-      });
-  }
-
-  addCameraIntervalConfig(camera, index) {
-    const container = document.getElementById('camera-intervals-container');
-    if (!container) return;
-
-    const cameraDiv = document.createElement('div');
-    cameraDiv.className = 'row mb-3 align-items-center';
-    cameraDiv.setAttribute('data-camera-interval-id', camera.id || `camera_${index + 1}`);
-
-    // Utiliser l'intervalle fourni par l'API, sinon valeur par défaut
-    const currentInterval = camera.analysis_interval || 2.0;
-
-    cameraDiv.innerHTML = `
-      <div class="col-md-4">
-        <strong><i class="bi bi-camera-video"></i> ${camera.name || camera.id || `Caméra ${index + 1}`}</strong>
-        <div class="text-muted small">ID: ${camera.id || `camera_${index + 1}`}</div>
-      </div>
-      <div class="col-md-4">
-        <div class="input-group">
-          <input type="number" 
-                 class="form-control" 
-                 name="${camera.id || `camera_${index + 1}`}_interval" 
-                 value="${currentInterval}" 
-                 min="0.1" 
-                 step="0.1" 
-                 placeholder="2.0">
-          <span class="input-group-text">secondes</span>
-        </div>
-        <div class="form-text">Intervalle minimum entre analyses (0.1 - 60s)</div>
-      </div>
-      <div class="col-md-4">
-        <button type="button" 
-                class="btn btn-outline-success btn-sm" 
-                onclick="adminApp.updateCameraInterval('${camera.id || `camera_${index + 1}`}')">
-          <i class="bi bi-check-circle"></i> Appliquer
-        </button>
-      </div>
-    `;
-
-    container.appendChild(cameraDiv);
-  }
-
-  getCurrentAnalysisInterval(cameraId) {
-    // Cette méthode n'est plus nécessaire car les données viennent de l'API
-    // Garder pour compatibilité ascendante
-    return 2.0;
-  }
-
-  updateCameraInterval(cameraId) {
-    const input = document.querySelector(`[name="${cameraId}_interval"]`);
+  // Gestion des intervalles d'analyse par caméra intégrée
+  applyCameraInterval(cameraId) {
+    const input = document.querySelector(`[name="${cameraId}_analysis_interval"]`);
     if (!input) {
       this.addLog(`Impossible de trouver le champ d'intervalle pour ${cameraId}`, "error");
       return;
@@ -1075,6 +1042,19 @@ class AdminApp {
     .then(data => {
       if (data.success) {
         this.addLog(`Intervalle d'analyse mis à jour pour ${cameraId}: ${intervalValue}s`, "success");
+        // Changer visuellement le bouton pour montrer le succès
+        const button = input.closest('.row').querySelector('button');
+        if (button) {
+          const originalHtml = button.innerHTML;
+          button.innerHTML = '<i class="bi bi-check"></i> Appliqué';
+          button.classList.remove('btn-outline-success');
+          button.classList.add('btn-success');
+          setTimeout(() => {
+            button.innerHTML = originalHtml;
+            button.classList.remove('btn-success');
+            button.classList.add('btn-outline-success');
+          }, 2000);
+        }
       } else {
         this.addLog(`Erreur lors de la mise à jour de ${cameraId}: ${data.message || 'Erreur inconnue'}`, "error");
       }
@@ -1082,11 +1062,6 @@ class AdminApp {
     .catch(error => {
       this.addLog(`Erreur de communication pour ${cameraId}: ${error.message}`, "error");
     });
-  }
-
-  refreshCameraIntervals() {
-    this.addLog("Actualisation des intervalles d'analyse...", "info");
-    this.loadCameraIntervals();
   }
 }
 
