@@ -829,23 +829,38 @@ def ha_polling_loop(ctx: CameraContext):
 
 
 def capture_loop(ctx: CameraContext):
-    """Boucle principale de capture RTSP"""
-    min_analysis_interval = float(os.getenv('MIN_ANALYSIS_INTERVAL', '0.1'))
+    """Boucle principale de capture RTSP optimisée avec détection de mouvement et cache intelligent"""
     
     while ctx.is_capturing:
         try:
             frame = camera_service.get_frame(ctx.camera_id)
             if frame is not None:
                 ctx.current_frame = frame
-                # Déclencher l'analyse si l'intervalle minimum est respecté
-                current_time = time.time()
-                if not ctx.analysis_in_progress and (current_time - ctx.last_analysis_time) >= min_analysis_interval:
-                    ctx.analysis_in_progress = True
-                    threading.Thread(
-                        target=analyze_frame,
-                        args=(ctx, frame.copy(), current_time),
-                        daemon=True
-                    ).start()
+                
+                # Utiliser la nouvelle méthode d'optimisation IA
+                # Cela inclut la détection de mouvement, le cache, et l'optimisation d'intervalle
+                if not ctx.analysis_in_progress:
+                    # Récupérer l'intervalle personnalisé pour cette caméra
+                    camera_interval = detection_service.get_camera_analysis_interval(ctx.camera_id)
+                    current_time = time.time()
+                    
+                    # Vérifier l'intervalle minimum ET utiliser les optimisations du CameraService
+                    time_since_last = current_time - ctx.last_analysis_time
+                    if time_since_last >= camera_interval:
+                        # Obtenir une frame optimisée (avec détection de mouvement et cache)
+                        optimized_buffer = camera_service.get_optimized_frame_for_ai(ctx.camera_id)
+                        
+                        if optimized_buffer is not None:
+                            ctx.analysis_in_progress = True
+                            # Convertir le buffer optimisé directement en base64 pour économiser du CPU
+                            img_base64 = base64.b64encode(optimized_buffer).decode('utf-8')
+                            threading.Thread(
+                                target=analyze_optimized_frame,
+                                args=(ctx, img_base64, current_time),
+                                daemon=True
+                            ).start()
+                        else:
+                            logger.debug(f"[{ctx.camera_id}] Frame skippée par les optimisations IA")
 
             # Cadence alignée sur la source si possible
             try:
@@ -860,8 +875,101 @@ def capture_loop(ctx: CameraContext):
             time.sleep(0.1)
 
 
+
+def analyze_optimized_frame(ctx: CameraContext, img_base64, start_time):
+    """Analyse une image pré-optimisée avec l'IA (pas besoin de redimensionnement)"""
+    try:
+        # L'image est déjà optimisée par le CameraService, pas besoin de traitement supplémentaire
+        result = detection_service.analyze_frame(img_base64, ctx.camera_id)
+
+        # Utiliser la même logique de gestion d'erreurs que analyze_frame
+        handle_ai_analysis_result(ctx, result, start_time)
+        
+    except Exception as e:
+        logger.error(f"[{ctx.camera_id}] analyse error: {e}")
+        # Publier l'erreur via MQTT
+        mqtt_service.publish_status({
+            'camera_id': ctx.camera_id,
+            'error': str(e),
+            'duration': time.time() - start_time
+        })
+    finally:
+        # Marquer l'analyse comme terminée, qu'elle ait réussi ou échoué
+        ctx.analysis_in_progress = False
+
+def handle_ai_analysis_result(ctx: CameraContext, result, start_time):
+    """Traite les résultats de l'IA et gère les erreurs (code mutualisé)"""
+    # Détecter erreurs IA (timeouts et erreurs de connexion) et arrêter si nécessaire
+    try:
+        if isinstance(result, dict):
+            err_text = (str(result.get('error', '')) + ' ' + str(result.get('details', ''))).lower()
+            success_flag = bool(result.get('success', True))
+
+            # Détection de timeout
+            is_timeout = (not success_flag) and any(
+                kw in err_text for kw in ['timeout', 'timed out', 'read timed out', 'deadline exceeded']
+            )
+            # Détection d'erreurs de connexion/réseau
+            is_connection_error = (not success_flag) and any(
+                kw in err_text for kw in [
+                    'connection error', 'connection refused', 'failed to establish a new connection',
+                    'connection reset', 'bad gateway', 'service unavailable', 'host unreachable',
+                    'network is unreachable', 'cannot connect', 'name or service not known', 'dns']
+            )
+
+            if success_flag:
+                # Reset sur succès
+                if ctx.ai_consecutive_failures:
+                    logger.debug(f"[{ctx.camera_id}] Réinitialisation du compteur d'échecs IA ({ctx.ai_consecutive_failures} → 0)")
+                ctx.ai_consecutive_failures = 0
+            else:
+                ctx.ai_consecutive_failures += 1
+                logger.warning(f"[{ctx.camera_id}] Échec IA #{ctx.ai_consecutive_failures}: {err_text[:200]}")
+
+            # Arrêt immédiat sur timeout ou erreur de connexion
+            should_stop_now = is_timeout or is_connection_error
+            # Arrêt après N échecs consécutifs (N=3)
+            failure_threshold_reached = ctx.ai_consecutive_failures >= 3
+
+            if ctx.is_capturing and (should_stop_now or failure_threshold_reached):
+                reason = 'timeout IA' if is_timeout else ('erreur de connexion IA' if is_connection_error else 'échecs IA répétés')
+                logger.error(f"[{ctx.camera_id}] 🛑 {reason} - arrêt de la capture")
+                ctx.is_capturing = False
+                try:
+                    camera_service.stop_capture(ctx.camera_id)
+                except Exception as e_stop:
+                    logger.warning(f"[{ctx.camera_id}] Erreur lors de l'arrêt de la capture après erreur IA: {e_stop}")
+                try:
+                    mqtt_service.publish_binary_sensor_state(f'{ctx.camera_id}_capture_active', False)
+                except Exception:
+                    pass
+    except Exception:
+        # Ne pas bloquer l'analyse si la détection d'erreur échoue
+        pass
+    
+    # Calculer la durée de l'analyse
+    end_time = time.time()
+    ctx.last_analysis_duration = end_time - start_time
+    # Calculer l'intervalle total (fin -> fin) par rapport à l'analyse précédente
+    ctx.last_analysis_total_interval = end_time - ctx.last_analysis_time if ctx.last_analysis_time else 0
+    ctx.last_analysis_time = end_time
+    
+    if ctx.last_analysis_total_interval and ctx.last_analysis_total_interval > 0:
+        logger.info(f"[{ctx.camera_id}] Analyse terminée en {ctx.last_analysis_duration:.2f}s | Intervalle total: {ctx.last_analysis_total_interval:.2f}s | FPS total: {1.0/ctx.last_analysis_total_interval:.2f}")
+    else:
+        logger.info(f"[{ctx.camera_id}] Analyse terminée en {ctx.last_analysis_duration:.2f}s")
+    
+    # Publier les informations d'analyse via MQTT
+    mqtt_service.publish_status({
+        'camera_id': ctx.camera_id,
+        'result': result,
+        'duration': ctx.last_analysis_duration
+    })
+
+
 def analyze_frame(ctx: CameraContext, frame, start_time):
-    """Analyse une image avec l'IA"""
+def analyze_frame(ctx: CameraContext, frame, start_time):
+    """Analyse une image avec l'IA (méthode legacy, conservée pour compatibilité)"""
     try:
         # Redimensionner l'image en 720p (1280x720) pour l'analyse
         resized_frame = resize_frame_for_analysis(frame)
@@ -873,72 +981,8 @@ def analyze_frame(ctx: CameraContext, frame, start_time):
         # Analyser avec les détections configurées
         result = detection_service.analyze_frame(img_base64, ctx.camera_id)
 
-        # Détecter erreurs IA (timeouts et erreurs de connexion) et arrêter si nécessaire
-        try:
-            if isinstance(result, dict):
-                err_text = (str(result.get('error', '')) + ' ' + str(result.get('details', ''))).lower()
-                success_flag = bool(result.get('success', True))
-
-                # Détection de timeout
-                is_timeout = (not success_flag) and any(
-                    kw in err_text for kw in ['timeout', 'timed out', 'read timed out', 'deadline exceeded']
-                )
-                # Détection d'erreurs de connexion/réseau
-                is_connection_error = (not success_flag) and any(
-                    kw in err_text for kw in [
-                        'connection error', 'connection refused', 'failed to establish a new connection',
-                        'connection reset', 'bad gateway', 'service unavailable', 'host unreachable',
-                        'network is unreachable', 'cannot connect', 'name or service not known', 'dns']
-                )
-
-                if success_flag:
-                    # Reset sur succès
-                    if ctx.ai_consecutive_failures:
-                        logger.debug(f"[{ctx.camera_id}] Réinitialisation du compteur d'échecs IA ({ctx.ai_consecutive_failures} → 0)")
-                    ctx.ai_consecutive_failures = 0
-                else:
-                    ctx.ai_consecutive_failures += 1
-                    logger.warning(f"[{ctx.camera_id}] Échec IA #{ctx.ai_consecutive_failures}: {err_text[:200]}")
-
-                # Arrêt immédiat sur timeout ou erreur de connexion
-                should_stop_now = is_timeout or is_connection_error
-                # Arrêt après N échecs consécutifs (N=3)
-                failure_threshold_reached = ctx.ai_consecutive_failures >= 3
-
-                if ctx.is_capturing and (should_stop_now or failure_threshold_reached):
-                    reason = 'timeout IA' if is_timeout else ('erreur de connexion IA' if is_connection_error else 'échecs IA répétés')
-                    logger.error(f"[{ctx.camera_id}] 🛑 {reason} - arrêt de la capture")
-                    ctx.is_capturing = False
-                    try:
-                        camera_service.stop_capture(ctx.camera_id)
-                    except Exception as e_stop:
-                        logger.warning(f"[{ctx.camera_id}] Erreur lors de l'arrêt de la capture après erreur IA: {e_stop}")
-                    try:
-                        mqtt_service.publish_binary_sensor_state(f'{ctx.camera_id}_capture_active', False)
-                    except Exception:
-                        pass
-        except Exception:
-            # Ne pas bloquer l'analyse si la détection d'erreur échoue
-            pass
-        
-        # Calculer la durée de l'analyse
-        end_time = time.time()
-        ctx.last_analysis_duration = end_time - start_time
-        # Calculer l'intervalle total (fin -> fin) par rapport à l'analyse précédente
-        ctx.last_analysis_total_interval = end_time - ctx.last_analysis_time if ctx.last_analysis_time else 0
-        ctx.last_analysis_time = end_time
-        
-        if ctx.last_analysis_total_interval and ctx.last_analysis_total_interval > 0:
-            logger.info(f"[{ctx.camera_id}] Analyse terminée en {ctx.last_analysis_duration:.2f}s | Intervalle total: {ctx.last_analysis_total_interval:.2f}s | FPS total: {1.0/ctx.last_analysis_total_interval:.2f}")
-        else:
-            logger.info(f"[{ctx.camera_id}] Analyse terminée en {ctx.last_analysis_duration:.2f}s")
-        
-        # Publier les informations d'analyse via MQTT
-        mqtt_service.publish_status({
-            'camera_id': ctx.camera_id,
-            'result': result,
-            'duration': ctx.last_analysis_duration
-        })
+        # Utiliser le handler centralisé
+        handle_ai_analysis_result(ctx, result, start_time)
         
     except Exception as e:
         logger.error(f"[{ctx.camera_id}] analyse error: {e}")

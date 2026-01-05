@@ -2,6 +2,8 @@ import cv2
 import threading
 import time
 import os
+import hashlib
+import numpy as np
 from PIL import Image
 import io
 from dotenv import load_dotenv
@@ -18,6 +20,14 @@ class CameraService:
         self.cameras_cache = None
         self.cache_time = 0
         self.cache_duration = 30  # Cache pendant 30 secondes
+        
+        # Optimisations IA
+        self.motion_threshold = float(os.getenv('MOTION_THRESHOLD', '5.0'))  # Seuil de détection de mouvement %
+        self.ai_image_quality = int(os.getenv('AI_IMAGE_QUALITY', '60'))    # Qualité JPEG pour l'IA (60%)
+        self.ai_max_width = int(os.getenv('AI_MAX_WIDTH', '1280'))          # Largeur max pour l'IA
+        self.ai_max_height = int(os.getenv('AI_MAX_HEIGHT', '720'))         # Hauteur max pour l'IA
+        self.frame_cache = {}  # camera_id -> {'last_hash': str, 'last_analysis_time': float}
+        self.motion_detection_enabled = os.getenv('MOTION_DETECTION', 'true').lower() == 'true'
         
         load_dotenv()
         
@@ -230,7 +240,11 @@ class CameraService:
                             'url': actual_url,
                             'last_frame_ts': 0.0,
                             'reconnect_attempts': 0,
-                            'next_reconnect_time': 0.0
+                            'next_reconnect_time': 0.0,
+                            'last_frame': None,  # Pour détection de mouvement
+                            'motion_detected': True,  # Force première analyse
+                            'frame_count': 0,
+                            'last_motion_time': 0.0
                         }
                         
                         logger.info(f"[{camera_id}] Capture RTSP démarrée avec succès")
@@ -353,6 +367,10 @@ class CameraService:
                     camera_info['last_frame_ts'] = time.time()
                     # reset compteur de reconnexion sur succès
                     camera_info['reconnect_attempts'] = 0
+                    
+                    # Mettre à jour les statistiques de frame
+                    camera_info['frame_count'] = camera_info.get('frame_count', 0) + 1
+                    
                     return frame
                 else:
                     # Plusieurs tentatives avec délai
@@ -478,3 +496,173 @@ class CameraService:
         self.cameras_cache = None
         self.cache_time = 0
         logger.info("🔄 CameraService: configuration RTSP rechargée depuis .env (cache invalidé)")
+
+    def detect_motion(self, camera_id, current_frame):
+        """Détecte le mouvement entre la frame actuelle et la précédente"""
+        if not self.motion_detection_enabled or camera_id not in self.captures:
+            return True  # Si désactivé, considérer qu'il y a toujours du mouvement
+        
+        camera_info = self.captures[camera_id]
+        last_frame = camera_info.get('last_frame')
+        
+        if last_frame is None:
+            # Première frame, sauvegarder et considérer qu'il y a mouvement
+            camera_info['last_frame'] = current_frame.copy()
+            camera_info['motion_detected'] = True
+            return True
+        
+        try:
+            # Redimensionner pour accélérer la détection de mouvement
+            small_current = cv2.resize(current_frame, (320, 240))
+            small_last = cv2.resize(last_frame, (320, 240))
+            
+            # Convertir en niveaux de gris
+            gray_current = cv2.cvtColor(small_current, cv2.COLOR_BGR2GRAY)
+            gray_last = cv2.cvtColor(small_last, cv2.COLOR_BGR2GRAY)
+            
+            # Calculer la différence
+            diff = cv2.absdiff(gray_current, gray_last)
+            
+            # Calculer le pourcentage de pixels qui ont changé
+            total_pixels = diff.shape[0] * diff.shape[1]
+            changed_pixels = np.count_nonzero(diff > 30)  # Seuil de changement
+            motion_percentage = (changed_pixels / total_pixels) * 100
+            
+            has_motion = motion_percentage > self.motion_threshold
+            
+            if has_motion:
+                camera_info['last_motion_time'] = time.time()
+                camera_info['motion_detected'] = True
+                logger.debug(f"[{camera_id}] Mouvement détecté: {motion_percentage:.1f}%")
+            else:
+                camera_info['motion_detected'] = False
+            
+            # Mettre à jour la frame de référence périodiquement
+            camera_info['frame_count'] += 1
+            if camera_info['frame_count'] % 30 == 0:  # Toutes les 30 frames
+                camera_info['last_frame'] = current_frame.copy()
+            
+            return has_motion
+            
+        except Exception as e:
+            logger.warning(f"[{camera_id}] Erreur détection mouvement: {e}")
+            return True  # En cas d'erreur, considérer qu'il y a mouvement
+    
+    def should_analyze_frame(self, camera_id):
+        """Détermine si une frame doit être analysée par l'IA basé sur plusieurs critères"""
+        if camera_id not in self.captures:
+            return False
+        
+        camera_info = self.captures[camera_id]
+        current_time = time.time()
+        
+        # Vérifier si assez de temps s'est écoulé depuis la dernière analyse
+        cache_key = f"last_analysis_{camera_id}"
+        if cache_key in self.frame_cache:
+            last_analysis = self.frame_cache[cache_key].get('last_analysis_time', 0)
+            # Utiliser un intervalle plus long s'il n'y a pas eu de mouvement récent
+            base_interval = 2.0  # Intervalle de base
+            if not camera_info.get('motion_detected', True):
+                # Pas de mouvement récent, rallonger l'intervalle
+                time_since_motion = current_time - camera_info.get('last_motion_time', 0)
+                if time_since_motion > 60:  # Plus d'une minute sans mouvement
+                    base_interval = 10.0  # Analyser seulement toutes les 10 secondes
+                elif time_since_motion > 30:  # Plus de 30 secondes sans mouvement
+                    base_interval = 5.0   # Analyser toutes les 5 secondes
+            
+            if current_time - last_analysis < base_interval:
+                return False
+        
+        return True
+    
+    def optimize_frame_for_ai(self, frame, camera_id):
+        """Optimise une frame pour l'envoi à l'IA (compression, résolution, etc.)"""
+        try:
+            if frame is None:
+                return None
+            
+            # Redimensionner intelligemment si nécessaire
+            height, width = frame.shape[:2]
+            if width > self.ai_max_width or height > self.ai_max_height:
+                # Calculer le ratio de redimensionnement en gardant l'aspect ratio
+                scale_w = self.ai_max_width / width
+                scale_h = self.ai_max_height / height
+                scale = min(scale_w, scale_h)
+                
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+                logger.debug(f"[{camera_id}] Frame redimensionnée: {width}x{height} -> {new_width}x{new_height}")
+            
+            # Encoder avec qualité réduite pour économiser la bande passante
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.ai_image_quality]
+            _, buffer = cv2.imencode('.jpg', frame, encode_params)
+            
+            return buffer
+            
+        except Exception as e:
+            logger.warning(f"[{camera_id}] Erreur optimisation frame: {e}")
+            # Fallback: encoder normalement
+            _, buffer = cv2.imencode('.jpg', frame)
+            return buffer
+    
+    def get_frame_hash(self, frame):
+        """Calcule un hash rapide d'une frame pour détecter les images identiques"""
+        try:
+            # Redimensionner à une petite taille pour le hash
+            small_frame = cv2.resize(frame, (64, 64))
+            # Convertir en niveaux de gris
+            gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+            # Calculer le hash
+            frame_hash = hashlib.md5(gray.tobytes()).hexdigest()
+            return frame_hash
+        except Exception:
+            return None
+    
+    def is_frame_significantly_different(self, camera_id, frame):
+        """Vérifie si la frame est significativement différente de la précédente analysée"""
+        frame_hash = self.get_frame_hash(frame)
+        if not frame_hash:
+            return True  # Si on ne peut pas calculer le hash, analyser par sécurité
+        
+        cache_key = f"last_analysis_{camera_id}"
+        if cache_key not in self.frame_cache:
+            self.frame_cache[cache_key] = {}
+        
+        last_hash = self.frame_cache[cache_key].get('last_hash')
+        if last_hash and last_hash == frame_hash:
+            logger.debug(f"[{camera_id}] Frame identique à la précédente, analyse skippée")
+            return False
+        
+        # Sauvegarder le nouveau hash
+        self.frame_cache[cache_key]['last_hash'] = frame_hash
+        self.frame_cache[cache_key]['last_analysis_time'] = time.time()
+        
+        return True
+    
+    def get_optimized_frame_for_ai(self, camera_id):
+        """Récupère et optimise une frame pour l'analyse IA avec tous les filtres d'optimisation"""
+        frame = self.get_frame(camera_id)
+        if frame is None:
+            return None
+        
+        # 1. Détection de mouvement
+        if self.motion_detection_enabled and not self.detect_motion(camera_id, frame):
+            logger.debug(f"[{camera_id}] Pas de mouvement détecté, analyse skippée")
+            return None
+        
+        # 2. Vérifier si on doit analyser selon l'intervalle adaptatif
+        if not self.should_analyze_frame(camera_id):
+            logger.debug(f"[{camera_id}] Intervalle non écoulé, analyse skippée")
+            return None
+        
+        # 3. Vérifier si la frame est différente de la précédente
+        if not self.is_frame_significantly_different(camera_id, frame):
+            return None
+        
+        # 4. Optimiser la frame pour l'IA
+        optimized_buffer = self.optimize_frame_for_ai(frame, camera_id)
+        
+        logger.debug(f"[{camera_id}] Frame optimisée pour IA: {len(optimized_buffer) if optimized_buffer is not None else 0} bytes")
+        
+        return optimized_buffer

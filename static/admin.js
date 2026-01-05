@@ -1010,58 +1010,80 @@ class AdminApp {
 
   // Gestion des intervalles d'analyse par caméra intégrée
   applyCameraInterval(cameraId) {
-    const input = document.querySelector(`[name="${cameraId}_analysis_interval"]`);
+    const input = document.querySelector(
+      `[name="${cameraId}_analysis_interval"]`
+    );
     if (!input) {
-      this.addLog(`Impossible de trouver le champ d'intervalle pour ${cameraId}`, "error");
+      this.addLog(
+        `Impossible de trouver le champ d'intervalle pour ${cameraId}`,
+        "error"
+      );
       return;
     }
 
     const intervalValue = parseFloat(input.value);
     if (isNaN(intervalValue) || intervalValue < 0.1 || intervalValue > 60) {
-      this.addLog(`Intervalle invalide pour ${cameraId}. Doit être entre 0.1 et 60 secondes`, "error");
+      this.addLog(
+        `Intervalle invalide pour ${cameraId}. Doit être entre 0.1 et 60 secondes`,
+        "error"
+      );
       input.focus();
       return;
     }
 
-    this.addLog(`Mise à jour de l'intervalle pour ${cameraId}: ${intervalValue}s...`, "info");
+    this.addLog(
+      `Mise à jour de l'intervalle pour ${cameraId}: ${intervalValue}s...`,
+      "info"
+    );
 
     // Envoyer la mise à jour au backend
     const updateData = {
       camera_id: cameraId,
-      interval: intervalValue
+      interval: intervalValue,
     };
 
-    fetch('/api/camera/interval', {
-      method: 'POST',
+    fetch("/api/camera/interval", {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json'
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(updateData)
+      body: JSON.stringify(updateData),
     })
-    .then(response => response.json())
-    .then(data => {
-      if (data.success) {
-        this.addLog(`Intervalle d'analyse mis à jour pour ${cameraId}: ${intervalValue}s`, "success");
-        // Changer visuellement le bouton pour montrer le succès
-        const button = input.closest('.row').querySelector('button');
-        if (button) {
-          const originalHtml = button.innerHTML;
-          button.innerHTML = '<i class="bi bi-check"></i> Appliqué';
-          button.classList.remove('btn-outline-success');
-          button.classList.add('btn-success');
-          setTimeout(() => {
-            button.innerHTML = originalHtml;
-            button.classList.remove('btn-success');
-            button.classList.add('btn-outline-success');
-          }, 2000);
+      .then((response) => response.json())
+      .then((data) => {
+        if (data.success) {
+          this.addLog(
+            `Intervalle d'analyse mis à jour pour ${cameraId}: ${intervalValue}s`,
+            "success"
+          );
+          // Changer visuellement le bouton pour montrer le succès
+          const button = input.closest(".row").querySelector("button");
+          if (button) {
+            const originalHtml = button.innerHTML;
+            button.innerHTML = '<i class="bi bi-check"></i> Appliqué';
+            button.classList.remove("btn-outline-success");
+            button.classList.add("btn-success");
+            setTimeout(() => {
+              button.innerHTML = originalHtml;
+              button.classList.remove("btn-success");
+              button.classList.add("btn-outline-success");
+            }, 2000);
+          }
+        } else {
+          this.addLog(
+            `Erreur lors de la mise à jour de ${cameraId}: ${
+              data.message || "Erreur inconnue"
+            }`,
+            "error"
+          );
         }
-      } else {
-        this.addLog(`Erreur lors de la mise à jour de ${cameraId}: ${data.message || 'Erreur inconnue'}`, "error");
-      }
-    })
-    .catch(error => {
-      this.addLog(`Erreur de communication pour ${cameraId}: ${error.message}`, "error");
-    });
+      })
+      .catch((error) => {
+        this.addLog(
+          `Erreur de communication pour ${cameraId}: ${error.message}`,
+          "error"
+        );
+      });
   }
 }
 
