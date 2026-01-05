@@ -968,7 +968,6 @@ def handle_ai_analysis_result(ctx: CameraContext, result, start_time):
 
 
 def analyze_frame(ctx: CameraContext, frame, start_time):
-def analyze_frame(ctx: CameraContext, frame, start_time):
     """Analyse une image avec l'IA (méthode legacy, conservée pour compatibilité)"""
     try:
         # Redimensionner l'image en 720p (1280x720) pour l'analyse
