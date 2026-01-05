@@ -53,6 +53,23 @@ class DetectionService:
         """Récupère l'intervalle d'analyse pour une caméra spécifique"""
         return self.camera_analysis_intervals.get(camera_id, self.min_analysis_interval)
     
+    def update_camera_analysis_interval(self, camera_id: str, interval: float) -> bool:
+        """Met à jour l'intervalle d'analyse pour une caméra spécifique"""
+        try:
+            if interval < 0.1 or interval > 60.0:
+                logger.warning(f"⚠️ Intervalle invalide pour {camera_id}: {interval}. Doit être entre 0.1 et 60 secondes")
+                return False
+            
+            with self.lock:
+                old_interval = self.camera_analysis_intervals.get(camera_id, self.min_analysis_interval)
+                self.camera_analysis_intervals[camera_id] = interval
+                logger.info(f"✅ Intervalle d'analyse mis à jour pour {camera_id}: {old_interval}s → {interval}s")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la mise à jour de l'intervalle pour {camera_id}: {e}")
+            return False
+    
     def add_detection(self, name: str, phrase: str, webhook_url: Optional[str] = None, enabled_cameras: Optional[List[str]] = None) -> str:
         """Ajoute une nouvelle détection personnalisée avec webhook optionnel"""
         with self.lock:

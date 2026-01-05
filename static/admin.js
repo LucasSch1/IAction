@@ -308,6 +308,9 @@ class AdminApp {
       // Charger les caméras supplémentaires
       this.loadCamerasConfiguration();
 
+      // Charger les intervalles d'analyse des caméras
+      this.loadCameraIntervals();
+
       this.addLog("✅ Configuration chargée avec succès", "success");
     } catch (error) {
       this.addLog(`❌ Erreur lors du chargement: ${error.message}`, "error");
@@ -966,6 +969,124 @@ class AdminApp {
     localStorage.setItem("additional_cameras", JSON.stringify(cameras));
 
     return cameras;
+  }
+
+  // Gestion des intervalles d'analyse par caméra
+  loadCameraIntervals() {
+    this.addLog("Chargement des intervalles d'analyse des caméras...", "info");
+    
+    fetch('/api/cameras')
+      .then(response => response.json())
+      .then(data => {
+        const container = document.getElementById('camera-intervals-container');
+        if (!container) return;
+
+        container.innerHTML = '';
+        
+        // Charger les caméras configurées depuis le backend
+        if (data.cameras && data.cameras.length > 0) {
+          data.cameras.forEach((camera, index) => {
+            this.addCameraIntervalConfig(camera, index);
+          });
+        }
+      })
+      .catch(error => {
+        this.addLog(`Erreur lors du chargement des intervalles: ${error.message}`, "error");
+      });
+  }
+
+  addCameraIntervalConfig(camera, index) {
+    const container = document.getElementById('camera-intervals-container');
+    if (!container) return;
+
+    const cameraDiv = document.createElement('div');
+    cameraDiv.className = 'row mb-3 align-items-center';
+    cameraDiv.setAttribute('data-camera-interval-id', camera.id || `camera_${index + 1}`);
+
+    // Utiliser l'intervalle fourni par l'API, sinon valeur par défaut
+    const currentInterval = camera.analysis_interval || 2.0;
+
+    cameraDiv.innerHTML = `
+      <div class="col-md-4">
+        <strong><i class="bi bi-camera-video"></i> ${camera.name || camera.id || `Caméra ${index + 1}`}</strong>
+        <div class="text-muted small">ID: ${camera.id || `camera_${index + 1}`}</div>
+      </div>
+      <div class="col-md-4">
+        <div class="input-group">
+          <input type="number" 
+                 class="form-control" 
+                 name="${camera.id || `camera_${index + 1}`}_interval" 
+                 value="${currentInterval}" 
+                 min="0.1" 
+                 step="0.1" 
+                 placeholder="2.0">
+          <span class="input-group-text">secondes</span>
+        </div>
+        <div class="form-text">Intervalle minimum entre analyses (0.1 - 60s)</div>
+      </div>
+      <div class="col-md-4">
+        <button type="button" 
+                class="btn btn-outline-success btn-sm" 
+                onclick="adminApp.updateCameraInterval('${camera.id || `camera_${index + 1}`}')">
+          <i class="bi bi-check-circle"></i> Appliquer
+        </button>
+      </div>
+    `;
+
+    container.appendChild(cameraDiv);
+  }
+
+  getCurrentAnalysisInterval(cameraId) {
+    // Cette méthode n'est plus nécessaire car les données viennent de l'API
+    // Garder pour compatibilité ascendante
+    return 2.0;
+  }
+
+  updateCameraInterval(cameraId) {
+    const input = document.querySelector(`[name="${cameraId}_interval"]`);
+    if (!input) {
+      this.addLog(`Impossible de trouver le champ d'intervalle pour ${cameraId}`, "error");
+      return;
+    }
+
+    const intervalValue = parseFloat(input.value);
+    if (isNaN(intervalValue) || intervalValue < 0.1 || intervalValue > 60) {
+      this.addLog(`Intervalle invalide pour ${cameraId}. Doit être entre 0.1 et 60 secondes`, "error");
+      input.focus();
+      return;
+    }
+
+    this.addLog(`Mise à jour de l'intervalle pour ${cameraId}: ${intervalValue}s...`, "info");
+
+    // Envoyer la mise à jour au backend
+    const updateData = {
+      camera_id: cameraId,
+      interval: intervalValue
+    };
+
+    fetch('/api/camera/interval', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(updateData)
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.success) {
+        this.addLog(`Intervalle d'analyse mis à jour pour ${cameraId}: ${intervalValue}s`, "success");
+      } else {
+        this.addLog(`Erreur lors de la mise à jour de ${cameraId}: ${data.message || 'Erreur inconnue'}`, "error");
+      }
+    })
+    .catch(error => {
+      this.addLog(`Erreur de communication pour ${cameraId}: ${error.message}`, "error");
+    });
+  }
+
+  refreshCameraIntervals() {
+    this.addLog("Actualisation des intervalles d'analyse...", "info");
+    this.loadCameraIntervals();
   }
 }
 

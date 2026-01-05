@@ -283,14 +283,29 @@ def get_config():
 
 @app.route('/api/cameras')
 def get_cameras():
-    """Récupère la liste des caméras RTSP disponibles"""
+    """Récupère la liste des caméras RTSP disponibles avec leurs intervalles d'analyse"""
     try:
         cameras = camera_service.get_available_cameras()
+        
+        # Enrichir les données des caméras avec les intervalles d'analyse
+        enriched_cameras = []
+        for camera in cameras:
+            camera_id = camera.get('id', '')
+            camera_data = camera.copy()  # Copier les données existantes
+            
+            # Ajouter l'intervalle d'analyse actuel
+            if hasattr(detection_service, 'get_camera_analysis_interval'):
+                camera_data['analysis_interval'] = detection_service.get_camera_analysis_interval(camera_id)
+            else:
+                camera_data['analysis_interval'] = 2.0  # Valeur par défaut
+            
+            enriched_cameras.append(camera_data)
+        
         return jsonify({
             'success': True,
-            'cameras': cameras,
-            'count': len(cameras),
-            'rtsp_count': len(cameras)  # Toutes les caméras sont RTSP maintenant
+            'cameras': enriched_cameras,
+            'count': len(enriched_cameras),
+            'rtsp_count': len(enriched_cameras)  # Toutes les caméras sont RTSP maintenant
         })
     except Exception as e:
         logger.error(f"Erreur lors de la récupération des caméras: {e}")
@@ -1506,6 +1521,70 @@ def shutdown_app():
         return jsonify({'success': True, 'message': 'Arrêt en cours...'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/camera/interval', methods=['POST'])
+def update_camera_interval():
+    """Met à jour l'intervalle d'analyse pour une caméra spécifique"""
+    try:
+        data = request.json or {}
+        camera_id = data.get('camera_id')
+        interval = data.get('interval')
+        
+        if not camera_id:
+            return jsonify({
+                'success': False,
+                'message': 'Camera ID manquant'
+            }), 400
+            
+        if interval is None:
+            return jsonify({
+                'success': False,
+                'message': 'Intervalle manquant'
+            }), 400
+            
+        try:
+            interval_float = float(interval)
+            if interval_float < 0.1 or interval_float > 60:
+                return jsonify({
+                    'success': False,
+                    'message': 'L\'intervalle doit être entre 0.1 et 60 secondes'
+                }), 400
+        except (ValueError, TypeError):
+            return jsonify({
+                'success': False,
+                'message': 'Intervalle invalide, doit être un nombre'
+            }), 400
+        
+        # Mettre à jour l'intervalle dans le service de détection
+        if hasattr(detection_service, 'update_camera_analysis_interval'):
+            success = detection_service.update_camera_analysis_interval(camera_id, interval_float)
+            if success:
+                logger.info(f"Intervalle d'analyse mis à jour pour {camera_id}: {interval_float}s")
+                return jsonify({
+                    'success': True,
+                    'message': f'Intervalle mis à jour pour {camera_id}: {interval_float}s',
+                    'camera_id': camera_id,
+                    'interval': interval_float
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': f'Impossible de mettre à jour l\'intervalle pour {camera_id}'
+                }), 500
+        else:
+            # Fallback si la méthode n'existe pas encore
+            logger.warning(f"Méthode update_camera_analysis_interval non disponible, intervalle ignoré pour {camera_id}")
+            return jsonify({
+                'success': False,
+                'message': 'Mise à jour des intervalles non supportée dans cette version'
+            }), 501
+            
+    except Exception as e:
+        logger.error(f"Erreur lors de la mise à jour de l'intervalle: {e}")
+        return jsonify({
+            'success': False,
+            'message': f'Erreur serveur: {str(e)}'
+        }), 500
 
 # Fonction pour nettoyer les ressources avant l'arrêt de l'application
 def cleanup():

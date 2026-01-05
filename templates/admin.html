@@ -256,21 +256,6 @@
                       name="MQTT_PASSWORD"
                     />
                   </div>
-                  <div class="col-md-6">
-                    <label for="mqtt_topic_prefix" class="form-label"
-                      >Préfixe des topics MQTT</label
-                    >
-                    <input
-                      type="text"
-                      class="form-control"
-                      id="mqtt_topic_prefix"
-                      name="MQTT_TOPIC_PREFIX"
-                      placeholder="lucas_iaction"
-                    />
-                    <div class="form-text">
-                      Préfixe utilisé pour tous les topics MQTT (ex: lucas_iaction/status)
-                    </div>
-                  </div>
                 </div>
 
                 <!-- Configuration Home Assistant -->
@@ -504,6 +489,36 @@
                     />
                     <div class="form-text">
                       Temps minimum à attendre entre deux analyses d'image
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Configuration Intervalles par Caméra -->
+                <div class="row mb-4">
+                  <div class="col-12">
+                    <h5>
+                      <i class="bi bi-clock-history"></i> Intervalles d'Analyse par Caméra
+                    </h5>
+                    <hr />
+                    <p class="text-muted">
+                      Configurez des intervalles d'analyse personnalisés pour chaque caméra selon l'usage de chaque pièce
+                    </p>
+                  </div>
+                  <div class="col-12">
+                    <div id="camera-intervals">
+                      <!-- Les intervalles par caméra seront ajoutés ici par JavaScript -->
+                    </div>
+                    <div class="mt-3">
+                      <button
+                        type="button"
+                        class="btn btn-outline-primary btn-sm"
+                        id="refresh-camera-intervals"
+                      >
+                        <i class="bi bi-arrow-clockwise"></i> Actualiser les caméras
+                      </button>
+                      <small class="text-muted ms-2">
+                        Cliquez pour charger les caméras configurées dans la section précédente
+                      </small>
                     </div>
                   </div>
                 </div>
